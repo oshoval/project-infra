@@ -17,7 +17,7 @@ presubmits:
       rehearsal.allowed: "true"
     spec:
       nodeSelector:
-        hardwareSupport: sriov-nic
+        kubernetes.io/hostname: ovirt-srv17.phx.ovirt.org
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -81,22 +81,23 @@ presubmits:
             type: Directory
   - name: check-up-kind-1.17-sriov-multi
     annotations:
-      k8s.v1.cni.cncf.io/networks: multus-cni-ns/sriov-passthrough-cni
-    always_run: true
-    optional: false
+      k8s.v1.cni.cncf.io/networks: multus-cni-ns/sriov-passthrough-cni-multi
+    always_run: false
+    optional: true
     decorate: true
     decoration_config:
       timeout: 1h
-    max_concurrency: 1
+    max_concurrency: 2 # once POC is done, we can reduce to 1 if desired
     labels:
       preset-dind-enabled: "true"
       preset-docker-mirror-proxy: "true"
       preset-kubevirtci-installer-pull-token: "true"
-      sriov-pod: "true"
+      #sriov-pod: "true" # uncomment only if safety catch is desired (sequential mode)
+      sriov-pod-multi: "true"
       rehearsal.allowed: "true"
     spec:
       nodeSelector:
-        hardwareSupport: sriov-nic
+        sriov-nic-multi: true
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -129,6 +130,9 @@ presubmits:
         resources:
           requests:
             memory: "15Gi"
+            prow/sriov: "1"
+          limits:
+            prow/sriov: "1"
         volumeMounts:
           #for running kind with dind (see https://github.com/kubernetes-sigs/kind/issues/303)
           - name: modules

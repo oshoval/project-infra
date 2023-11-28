@@ -3,11 +3,11 @@ load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 go_library(
     name = "go_default_library",
     srcs = ["main.go"],
-    importpath = "kubevirt.io/project-infra/external-plugins/rehearse/plugin",
+    importpath = "kubevirt.io/project-infra/external-plugins/phased/plugin",
     visibility = ["//visibility:private"],
     deps = [
-        "//external-plugins/rehearse/plugin/handler:go_default_library",
-        "//external-plugins/rehearse/plugin/server:go_default_library",
+        "//external-plugins/phased/plugin/handler:go_default_library",
+        "//external-plugins/phased/plugin/server:go_default_library",
         "@com_github_sirupsen_logrus//:go_default_library",
         "@io_k8s_client_go//rest:go_default_library",
         "@io_k8s_client_go//tools/clientcmd:go_default_library",
@@ -38,7 +38,7 @@ container_push(
     format = "Docker",
     image = ":app",
     registry = "quay.io",
-    repository = "kubevirtci/rehearse",
+    repository = "kubevirtci/phased",
     tag = "{DOCKER_TAG}",
 )
 
@@ -51,11 +51,11 @@ go_binary(
 go_test(
     name = "go_default_test",
     srcs = [
-        "rehearse_suite_test.go",
-        "rehearse_test.go",
+        "phased_suite_test.go",
+        "phased_test.go",
     ],
     deps = [
-        "//external-plugins/rehearse/plugin/handler:go_default_library",
+        "//external-plugins/phased/plugin/handler:go_default_library",
         "@com_github_onsi_ginkgo_v2//:go_default_library",
         "@com_github_onsi_gomega//:go_default_library",
         "@com_github_sirupsen_logrus//:go_default_library",

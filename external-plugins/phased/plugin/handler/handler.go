@@ -1,17 +1,12 @@
 package handler
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/r3labs/diff/v3"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"os/exec"
-	"path"
-	"reflect"
-	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/go-git/go-git/v5"
@@ -19,30 +14,27 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/sirupsen/logrus"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	v1 "k8s.io/test-infra/prow/client/clientset/versioned/typed/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
 	gitv2 "k8s.io/test-infra/prow/git/v2"
 	"k8s.io/test-infra/prow/github"
-	"k8s.io/test-infra/prow/pjutil"
 )
 
-const basicHelpCommentText = `You can trigger rehearsal for all jobs by commenting either ` + "`/rehearse`" + ` or ` + "`/rehearse all`" + `
-on this PR.
+// const basicHelpCommentText = `You can trigger rehearsal for all jobs by commenting either ` + "`/rehearse`" + ` or ` + "`/rehearse all`" + `
+// on this PR.
 
-For a specific PR you can comment ` + "`/rehearse {job-name}`" + `.
+// For a specific PR you can comment ` + "`/rehearse {job-name}`" + `.
 
-For a list of jobs that you can rehearse you can comment ` + "`/rehearse ?`" + `.`
+// For a list of jobs that you can rehearse you can comment ` + "`/rehearse ?`" + `.`
 
 var log *logrus.Logger
 
-// rehearseCommentRe matches either the sole command, i.e.
-// /rehearse
-// or the command followed by a job name which we then extract by the
-// capturing group, i.e.
-// /rehearse job-name
-var rehearseCommentRe = regexp.MustCompile(`(?m)^/rehearse\s*?($|\s.*)`)
+// // rehearseCommentRe matches either the sole command, i.e.
+// // /rehearse
+// // or the command followed by a job name which we then extract by the
+// // capturing group, i.e.
+// // /rehearse job-name
+// var rehearseCommentRe = regexp.MustCompile(`(?m)^/rehearse\s*?($|\s.*)`)
 
 func init() {
 	log = logrus.New()
@@ -64,7 +56,7 @@ type GitHubEventsHandler struct {
 	gitClientFactory gitv2.ClientFactory
 	prowConfigPath   string
 	jobsConfigBase   string
-	alwaysRun        bool
+	prowLocation     string
 }
 
 // NewGitHubEventsHandler returns a new github events handler
@@ -75,7 +67,7 @@ func NewGitHubEventsHandler(
 	ghClient githubClientInterface,
 	prowConfigPath string,
 	jobsConfigBase string,
-	alwaysRun bool,
+	prowLocation string,
 	gitClientFactory gitv2.ClientFactory) *GitHubEventsHandler {
 
 	return &GitHubEventsHandler{
@@ -85,7 +77,7 @@ func NewGitHubEventsHandler(
 		ghClient:         ghClient,
 		prowConfigPath:   prowConfigPath,
 		jobsConfigBase:   jobsConfigBase,
-		alwaysRun:        alwaysRun,
+		prowLocation:     prowLocation,
 		gitClientFactory: gitClientFactory,
 	}
 }
@@ -97,7 +89,6 @@ type githubClientInterface interface {
 }
 
 func (h *GitHubEventsHandler) Handle(incomingEvent *GitHubEvent) {
-
 	log.Infoln("GitHub events handler started")
 	eventLog := log.WithField("event-guid", incomingEvent.GUID)
 	switch incomingEvent.Type {
@@ -109,74 +100,18 @@ func (h *GitHubEventsHandler) Handle(incomingEvent *GitHubEvent) {
 			return
 		}
 		h.handlePullRequestUpdateEvent(eventLog, &event)
-	case "issue_comment":
-		logrus.Infoln("Handling issue comment event")
-		var event github.IssueCommentEvent
-		if err := json.Unmarshal(incomingEvent.Payload, &event); err != nil {
-			log.WithError(err).Error("Could not unmarshal event.")
-			return
-		}
-		h.handleIssueComment(eventLog, &event)
 	default:
 		log.Infoln("Dropping irrelevant:", incomingEvent.Type, incomingEvent.GUID)
 	}
 }
 
-func (h *GitHubEventsHandler) handleIssueComment(log *logrus.Entry, event *github.IssueCommentEvent) {
-	defer func() {
-		if r := recover(); r != nil {
-			h.logger.Warnf("Recovered during handling of an issue comment event: %s", event.GUID)
-		}
-	}()
-
-	if !h.shouldActOnIssueComment(event) {
-		log.Infoln("Skipping event - we shouldn't act on it")
-		return
-	}
-
-	if !rehearseCommentRe.MatchString(event.Comment.Body) {
-		return
-	}
-
-	org, repo, err := gitv2.OrgRepo(event.Repo.FullName)
-	if err != nil {
-		log.WithError(err).Errorf("Could not get org/repo from the event")
-	}
-	pr, err := h.ghClient.GetPullRequest(org, repo, event.Issue.Number)
-	if err != nil {
-		log.WithError(err).Errorf("Could not get PR number %d", event.Issue.Number)
-	}
-	if !h.canUserRehearse(err, org, event.Comment.User.Login, pr) {
-		log.Infoln("Skipping event - user validation failed")
-		return
-	}
-	h.handleRehearsalForPR(log, pr, event.GUID, event.Comment.Body)
-}
-
 func (h *GitHubEventsHandler) shouldActOnPREvent(event *github.PullRequestEvent) bool {
 	switch event.Action {
-	case github.PullRequestActionOpened, github.PullRequestActionSynchronize:
+	case github.PullRequestActionLabeled:
 		return true
 	default:
 		return false
 	}
-}
-
-func (h *GitHubEventsHandler) shouldActOnIssueComment(event *github.IssueCommentEvent) bool {
-	if event.Issue.IsPullRequest() && event.Issue.State == "open" && event.Action == github.IssueCommentActionCreated {
-		log.Infof("Event is PR: %t, event issue state: %s, event action: %s", event.Issue.IsPullRequest(), event.Issue.State, event.Action)
-		return true
-	}
-	return false
-}
-
-func (h *GitHubEventsHandler) canUserRehearse(err error, org string, userName string, pr *github.PullRequest) bool {
-	isMember, err := h.ghClient.IsMember(org, userName)
-	if err != nil {
-		log.WithError(err).Errorln("Could not validate PR author with the repo org")
-		return false
-	}
-	return isMember || github.HasLabel("ok-to-test", pr.Labels)
 }
 
 func (h *GitHubEventsHandler) handlePullRequestUpdateEvent(log *logrus.Entry, event *github.PullRequestEvent) {
@@ -186,10 +121,6 @@ func (h *GitHubEventsHandler) handlePullRequestUpdateEvent(log *logrus.Entry, ev
 		}
 	}()
 
-	if !h.alwaysRun {
-		return
-	}
-
 	log.Infof("Handling updated pull request: %s [%d]", event.Repo.FullName, event.PullRequest.Number)
 
 	if !h.shouldActOnPREvent(event) {
@@ -197,197 +128,202 @@ func (h *GitHubEventsHandler) handlePullRequestUpdateEvent(log *logrus.Entry, ev
 		return
 	}
 
-	org, repo, err := gitv2.OrgRepo(event.Repo.FullName)
-	if err != nil {
-		log.WithError(err).Errorf("Could not get org/repo from the event")
-	}
-	pr, err := h.ghClient.GetPullRequest(org, repo, event.PullRequest.Number)
-	if err != nil {
-		log.WithError(err).Errorf("Could not get PR number %d", event.PullRequest.Number)
-	}
-	if !h.canUserRehearse(err, org, event.Sender.Login, pr) {
-		log.Infoln("Skipping event. User is not authorized.")
-		return
-	}
+	// org, repo, err := gitv2.OrgRepo(event.Repo.FullName)
+	// if err != nil {
+	// 	log.WithError(err).Errorf("Could not get org/repo from the event")
+	// }
 
+	// pr, err := h.ghClient.GetPullRequest(org, repo, event.PullRequest.Number)
+	// if err != nil {
+	// 	log.WithError(err).Errorf("Could not get PR number %d", event.PullRequest.Number)
+	// }
+
+	// TODO change name
 	h.handleRehearsalForPR(log, &event.PullRequest, event.GUID, "")
 }
 
 func (h *GitHubEventsHandler) handleRehearsalForPR(log *logrus.Entry, pr *github.PullRequest, eventGUID string, commentBody string) {
-	org, repo, err := gitv2.OrgRepo(pr.Base.Repo.FullName)
-	if err != nil {
-		log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
-		return
-	}
-	log.Infoln("Generating git client")
-	git, err := h.gitClientFactory.ClientFor(org, repo)
-	if err != nil {
-		return
-	}
-	log.Infoln("Rebasing the PR on the target branch")
-	git.Config("user.email", "kubevirtbot@redhat.com")
-	git.Config("user.name", "Kubevirt Bot")
-	err = git.MergeAndCheckout(pr.Base.SHA, string(github.MergeSquash), pr.Head.SHA)
-	if err != nil {
-		log.WithError(err).Error("Could not rebase the PR on the target branch.")
-		return
-	}
-	log.Infoln("Getting diff")
-	changedFiles, err := git.Diff(pr.Base.SHA, "HEAD")
-	if err != nil {
-		log.WithError(err).Error("Could not calculate diff for PR.")
-		return
-	}
-	log.Infoln("Changed files:", changedFiles)
-	changedJobConfigs, err := h.modifiedJobConfigs(changedFiles)
-	if err != nil {
-		log.WithError(err).Error("Could not calculate absolute paths for modified job configs")
-		return
-	}
-	log.Infoln("Changed job configs:", changedJobConfigs)
-	headConfigs, err := h.loadConfigsAtRef(changedJobConfigs, git, "HEAD")
-	if err != nil {
-		log.WithError(err).Errorf(
-			"Could not load job configs from head ref: %s", "HEAD")
-	}
+	// org, repo, err := gitv2.OrgRepo(pr.Base.Repo.FullName)
+	// if err != nil {
+	// 	log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
+	// 	return
+	// }
+	// log.Infoln("Generating git client")
+	// git, err := h.gitClientFactory.ClientFor(org, repo)
+	// if err != nil {
+	// 	return
+	// }
 
-	baseConfigs, err := h.loadConfigsAtRef(changedJobConfigs, git, pr.Base.SHA)
-	if err != nil {
-		log.WithError(err).Errorf(
-			"Could not load job configs from base ref: %s", pr.Base.SHA)
-	}
-	log.Infoln("Base configs:", baseConfigs)
+	// TODO remove
+	// log.Infoln("Rebasing the PR on the target branch")
+	// git.Config("user.email", "kubevirtbot@redhat.com")
+	// git.Config("user.name", "Kubevirt Bot")
+	// err = git.MergeAndCheckout(pr.Base.SHA, string(github.MergeSquash), pr.Head.SHA)
+	// if err != nil {
+	// 	log.WithError(err).Error("Could not rebase the PR on the target branch.")
+	// 	return
+	// }
+	// log.Infoln("Getting diff")
+	// changedFiles, err := git.Diff(pr.Base.SHA, "HEAD")
+	// if err != nil {
+	// 	log.WithError(err).Error("Could not calculate diff for PR.")
+	// 	return
+	// }
+	// log.Infoln("Changed files:", changedFiles)
 
-	prowjobs := h.generateProwJobs(headConfigs, baseConfigs, pr, eventGUID)
-	jobNames := h.extractJobNamesFromComment(commentBody)
-	if len(jobNames) == 1 && jobNames[0] == "?" {
-		var prowJobNames []string
-		for _, prowJob := range prowjobs {
-			prowJobNames = append(prowJobNames, prowJob.Spec.Job)
-		}
-		commentText := fmt.Sprintf(`Rehearsal is available for the following jobs in this PR:
+	// changedJobConfigs, err := h.modifiedJobConfigs(changedFiles)
+	// if err != nil {
+	// 	log.WithError(err).Error("Could not calculate absolute paths for modified job configs")
+	// 	return
+	// }
+	// log.Infoln("Changed job configs:", changedJobConfigs)
 
-`+"```"+`
-%s
-`+"```"+`
+	// headConfigs, err := h.loadConfigsAtRef(changedJobConfigs, git, "HEAD")
+	// if err != nil {
+	// 	log.WithError(err).Errorf(
+	// 		"Could not load job configs from head ref: %s", "HEAD")
+	// }
 
-`+basicHelpCommentText, strings.Join(prowJobNames, "\n"))
-		err := h.ghClient.CreateComment(org, repo, pr.Number, commentText)
-		if err != nil {
-			log.WithError(err).Errorf("Failed to create comment on %s/%s PR: %d", org, repo, pr.Number)
-		}
-		return
-	}
+	// baseConfigs, err := h.loadConfigsAtRef(changedJobConfigs, git, pr.Base.SHA)
+	// if err != nil {
+	// 	log.WithError(err).Errorf(
+	// 		"Could not load job configs from base ref: %s", pr.Base.SHA)
+	// }
 
-	prowjobs = h.filterProwJobsByJobNames(prowjobs, jobNames)
+	/*
+			log.Infoln("Base configs:", baseConfigs)
 
-	log.Infof("Will create %d jobs", len(prowjobs))
-	var rehearsalsGenerated []string
-	var rehearsalsFailed []string
-	for _, job := range prowjobs {
-		if job.Labels == nil {
-			job.Labels = make(map[string]string)
-		}
-		job.Labels["rehearsal"] = "true"
-		job.Labels["rehearsal-for-pull-request"] = strconv.Itoa(pr.Number)
-		rehearsalName := strings.Join([]string{"rehearsal", job.Spec.Job}, "-")
-		job.Spec.Job = rehearsalName
-		job.Spec.Context = rehearsalName
-		_, err := h.prowClient.Create(context.Background(), &job, metav1.CreateOptions{})
-		if err != nil {
-			rehearsalsFailed = append(rehearsalsFailed, rehearsalName)
-			log.WithError(err).Errorf("Failed to create prow job: %s", job.Spec.Job)
-			continue
-		}
-		rehearsalsGenerated = append(rehearsalsGenerated, rehearsalName)
-		log.Infof("Created a rehearse job: %s", job.Name)
-	}
-	commentText := fmt.Sprintf(`Rehearsal jobs created for this PR:
+			prowjobs := h.generateProwJobs(headConfigs, baseConfigs, pr, eventGUID)
+			jobNames := h.extractJobNamesFromComment(commentBody)
+			if len(jobNames) == 1 && jobNames[0] == "?" {
+				var prowJobNames []string
+				for _, prowJob := range prowjobs {
+					prowJobNames = append(prowJobNames, prowJob.Spec.Job)
+				}
+				commentText := fmt.Sprintf(`Rehearsal is available for the following jobs in this PR:
 
-`+"```"+`
-%s
-`+"```"+`
+		`+"```"+`
+		%s
+		`+"```"+`
 
-`+basicHelpCommentText, strings.Join(rehearsalsGenerated, "\n"))
-	err = h.ghClient.CreateComment(org, repo, pr.Number, commentText)
-	if err != nil {
-		log.WithError(err).Errorf("Failed to create comment on %s/%s PR: %d", org, repo, pr.Number)
-	}
-	if len(rehearsalsFailed) > 0 {
-		commentText = fmt.Sprintf(`Rehearsal jobs failed to create for this PR:
+		`+basicHelpCommentText, strings.Join(prowJobNames, "\n"))
+				err := h.ghClient.CreateComment(org, repo, pr.Number, commentText)
+				if err != nil {
+					log.WithError(err).Errorf("Failed to create comment on %s/%s PR: %d", org, repo, pr.Number)
+				}
+				return
+			}
 
-`+"```"+`
-%s
-`+"```"+`
+			prowjobs = h.filterProwJobsByJobNames(prowjobs, jobNames)
 
-`+basicHelpCommentText, strings.Join(rehearsalsFailed, "\n"))
-		err = h.ghClient.CreateComment(org, repo, pr.Number, commentText)
-		if err != nil {
-			log.WithError(err).Errorf("Failed to create comment on %s/%s PR: %d", org, repo, pr.Number)
-		}
-	}
+			log.Infof("Will create %d jobs", len(prowjobs))
+			var rehearsalsGenerated []string
+			var rehearsalsFailed []string
+			for _, job := range prowjobs {
+				if job.Labels == nil {
+					job.Labels = make(map[string]string)
+				}
+				job.Labels["rehearsal"] = "true"
+				job.Labels["rehearsal-for-pull-request"] = strconv.Itoa(pr.Number)
+				rehearsalName := strings.Join([]string{"rehearsal", job.Spec.Job}, "-")
+				job.Spec.Job = rehearsalName
+				job.Spec.Context = rehearsalName
+				_, err := h.prowClient.Create(context.Background(), &job, metav1.CreateOptions{})
+				if err != nil {
+					rehearsalsFailed = append(rehearsalsFailed, rehearsalName)
+					log.WithError(err).Errorf("Failed to create prow job: %s", job.Spec.Job)
+					continue
+				}
+				rehearsalsGenerated = append(rehearsalsGenerated, rehearsalName)
+				log.Infof("Created a rehearse job: %s", job.Name)
+			}
+			commentText := fmt.Sprintf(`Rehearsal jobs created for this PR:
+
+		`+"```"+`
+		%s
+		`+"```"+`
+
+		`+basicHelpCommentText, strings.Join(rehearsalsGenerated, "\n"))
+			err = h.ghClient.CreateComment(org, repo, pr.Number, commentText)
+			if err != nil {
+				log.WithError(err).Errorf("Failed to create comment on %s/%s PR: %d", org, repo, pr.Number)
+			}
+			if len(rehearsalsFailed) > 0 {
+				commentText = fmt.Sprintf(`Rehearsal jobs failed to create for this PR:
+
+		`+"```"+`
+		%s
+		`+"```"+`
+
+		`+basicHelpCommentText, strings.Join(rehearsalsFailed, "\n"))
+				err = h.ghClient.CreateComment(org, repo, pr.Number, commentText)
+				if err != nil {
+					log.WithError(err).Errorf("Failed to create comment on %s/%s PR: %d", org, repo, pr.Number)
+				}
+			} */
 }
 
-func (h *GitHubEventsHandler) extractJobNamesFromComment(body string) []string {
-	if body == "" {
-		return nil
-	}
-	var jobNames []string
-	allStringSubmatch := rehearseCommentRe.FindAllStringSubmatch(body, -1)
-	for _, subMatches := range allStringSubmatch {
-		if len(subMatches) < 2 {
-			continue
-		}
-		trimmedJobName := strings.TrimSpace(subMatches[1])
-		if trimmedJobName == "" || trimmedJobName == "all" {
-			continue
-		}
-		jobNames = append(jobNames, trimmedJobName)
-	}
-	return jobNames
-}
+// func (h *GitHubEventsHandler) extractJobNamesFromComment(body string) []string {
+// 	if body == "" {
+// 		return nil
+// 	}
+// 	var jobNames []string
+// 	allStringSubmatch := rehearseCommentRe.FindAllStringSubmatch(body, -1)
+// 	for _, subMatches := range allStringSubmatch {
+// 		if len(subMatches) < 2 {
+// 			continue
+// 		}
+// 		trimmedJobName := strings.TrimSpace(subMatches[1])
+// 		if trimmedJobName == "" || trimmedJobName == "all" {
+// 			continue
+// 		}
+// 		jobNames = append(jobNames, trimmedJobName)
+// 	}
+// 	return jobNames
+// }
 
-func (h *GitHubEventsHandler) filterProwJobsByJobNames(prowjobs []prowapi.ProwJob, jobNames []string) []prowapi.ProwJob {
-	if len(jobNames) == 0 {
-		return prowjobs
-	}
-	jobNamesToFilter := map[string]struct{}{}
-	for _, jobName := range jobNames {
-		jobNamesToFilter[jobName] = struct{}{}
-	}
-	var filteredProwJobs []prowapi.ProwJob
-	for _, prowjob := range prowjobs {
-		if _, exists := jobNamesToFilter[prowjob.Spec.Job]; !exists {
-			continue
-		}
-		filteredProwJobs = append(filteredProwJobs, prowjob)
-	}
-	return filteredProwJobs
-}
+// func (h *GitHubEventsHandler) filterProwJobsByJobNames(prowjobs []prowapi.ProwJob, jobNames []string) []prowapi.ProwJob {
+// 	if len(jobNames) == 0 {
+// 		return prowjobs
+// 	}
+// 	jobNamesToFilter := map[string]struct{}{}
+// 	for _, jobName := range jobNames {
+// 		jobNamesToFilter[jobName] = struct{}{}
+// 	}
+// 	var filteredProwJobs []prowapi.ProwJob
+// 	for _, prowjob := range prowjobs {
+// 		if _, exists := jobNamesToFilter[prowjob.Spec.Job]; !exists {
+// 			continue
+// 		}
+// 		filteredProwJobs = append(filteredProwJobs, prowjob)
+// 	}
+// 	return filteredProwJobs
+// }
 
-const rehearsalRestrictedAnnotation = "rehearsal.restricted"
+// const rehearsalRestrictedAnnotation = "rehearsal.restricted"
 
-func rehearsalRestricted(job prowapi.ProwJob) bool {
-	annotations := job.GetAnnotations()
-	if annotations == nil {
-		return false
-	}
-	isRestricted, restrictedAnnotationExists := annotations[rehearsalRestrictedAnnotation]
-	return restrictedAnnotationExists && isRestricted == "true"
-}
+// func rehearsalRestricted(job prowapi.ProwJob) bool {
+// 	annotations := job.GetAnnotations()
+// 	if annotations == nil {
+// 		return false
+// 	}
+// 	isRestricted, restrictedAnnotationExists := annotations[rehearsalRestrictedAnnotation]
+// 	return restrictedAnnotationExists && isRestricted == "true"
+// }
 
-func (h *GitHubEventsHandler) generateProwJobs(
-	headConfigs, baseConfigs map[string]*config.Config, pr *github.PullRequest, eventGUID string) []prowapi.ProwJob {
-	var jobs []prowapi.ProwJob
+// func (h *GitHubEventsHandler) generateProwJobs(
+// 	headConfigs, baseConfigs map[string]*config.Config, pr *github.PullRequest, eventGUID string) []prowapi.ProwJob {
+// 	var jobs []prowapi.ProwJob
 
-	for path, headConfig := range headConfigs {
-		baseConfig, _ := baseConfigs[path]
-		jobs = append(jobs, h.generatePresubmits(headConfig, baseConfig, pr, eventGUID)...)
-	}
+// 	for path, headConfig := range headConfigs {
+// 		baseConfig, _ := baseConfigs[path]
+// 		jobs = append(jobs, h.generatePresubmits(headConfig, baseConfig, pr, eventGUID)...)
+// 	}
 
-	return jobs
-}
+// 	return jobs
+// }
 
+/*
 func (h *GitHubEventsHandler) generatePresubmits(
 	headConfig, baseConfig *config.Config, pr *github.PullRequest, eventGUID string) []prowapi.ProwJob {
 	var jobs []prowapi.ProwJob
@@ -452,9 +388,9 @@ func (h *GitHubEventsHandler) generatePresubmits(
 	}
 	return jobs
 }
+*/
 
-func (h *GitHubEventsHandler) loadConfigsAtRef(
-	changedJobConfigs []string, git gitv2.RepoClient, ref string) (map[string]*config.Config, error) {
+func (h *GitHubEventsHandler) loadConfigsAtRef(git gitv2.RepoClient, pr *github.PullRequest) (map[string]*config.Config, error) {
 	configs := map[string]*config.Config{}
 
 	tmpdir, err := ioutil.TempDir("", "prow-configs")
@@ -467,97 +403,180 @@ func (h *GitHubEventsHandler) loadConfigsAtRef(
 	// the repo is checked out with any refspec. Instead, we use git cat-file to read the files that we need to the
 	// memory and write them to a temp file. We need the temp file because the current version of Prow's config module
 	// can't load the configs from the memory.
-	prowConfigBytes, ret := catFile(log, git.Directory(), h.prowConfigPath, ref)
-	if ret != 0 && ret != 128 {
-		log.WithError(err).Errorf("Could not load Prow config [%s] at ref: %s", h.prowConfigPath, ref)
-		return nil, err
+
+	// TODO must change git.Directory() to be the project-infra directory,
+	// but maybe catFile cant work on remote ? and then we need some remote cat
+
+	// need to http fetch
+	// but what about unit tests ? they can use catFile but need to determine
+	// maybe according git.Directory(), on unit tests its /tmp/gitrepo2772208634
+	// strive to make it param, that either can be http or not, and check according that
+	// if git.Directory() != "" {
+	// 	panic(fmt.Sprintf("Panic: %s", git.Directory()))
+	// }
+
+	var prowConfigBytes, jobConfigBytes []byte
+	prowLocation := h.prowLocation
+	if prowLocation == "" {
+		// for unit tests, unless we create a dedicated unit tests folder(s)
+		prowLocation = git.Directory()
+		ret := 0
+		prowConfigBytes, ret = catFile(log, prowLocation, h.prowConfigPath, "HEAD")
+		if ret != 0 && ret != 128 {
+			log.WithError(err).Errorf("Could not load Prow config %s", h.prowConfigPath)
+			return nil, err
+		}
+
+		// TODO support the jobConfig files
+	} else {
+		prowConfigUrl := prowLocation + "/" + h.prowConfigPath
+		prowConfigBytes, err = fetchRemoteFile(prowConfigUrl)
+		if err != nil {
+			log.WithError(err).Errorf("Could not fetch prow config from %s", prowConfigUrl)
+			return nil, err
+		}
+
+		org, repo, err := gitv2.OrgRepo(pr.Base.Repo.FullName)
+		if err != nil {
+			log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
+			return nil, err
+		}
+
+		branchAddon := ""
+		if strings.HasPrefix(pr.Base.Ref, "release") {
+			branchAddon = "-" + strings.TrimPrefix(pr.Base.Ref, "release")
+		}
+
+		// NOTE: only bracnhes main / master and release-<number> are supported, and must be yaml files (not yml)
+		// for example kubevirt-presubmits-1.1.yaml will belong to release-1.1
+		jobConfigUrl := prowLocation + "/" + h.jobsConfigBase + "/" + org + "/" +
+			repo + "/" + repo + "-presubmits" + branchAddon + ".yaml"
+		jobConfigBytes, err = fetchRemoteFile(jobConfigUrl)
+		if err != nil {
+			log.WithError(err).Errorf("Could not fetch prow config from %s", jobConfigUrl)
+			return nil, err
+		}
 	}
-	log.Infoln("File:", string(prowConfigBytes))
-	prowConfigTmp, err := writeTempFile(log, tmpdir, prowConfigBytes)
+
+	// continue prowConfigTmp
+	_, err = writeTempFile(log, tmpdir, prowConfigBytes)
 	if err != nil {
 		log.WithError(err).Errorf("Could not write temporary Prow config.")
 		return nil, err
 	}
 
-	for _, changedJobConfig := range changedJobConfigs {
-		bytes, ret := catFile(log, git.Directory(), changedJobConfig, ref)
-		if ret == 128 {
-			// 128 means that the file was probably deleted in the PR or doesn't exists
-			// so to avoid an edge case where we need to take care of a null pointer, we
-			// generate an empty pc w/o jobs.
-			configs[changedJobConfig] = &config.Config{}
-			continue
-		} else if ret != 0 {
-			log.Errorf("Could not read job config from path %s at git ref: %s", changedJobConfig, ref)
-			return nil, fmt.Errorf("could not read job config from git ref")
-		}
-		jobConfigTmp, err := writeTempFile(log, tmpdir, bytes)
-		if err != nil {
-			log.WithError(err).Infoln("Could not write temp file")
-			return nil, err
-		}
-		pc, err := config.Load(prowConfigTmp, jobConfigTmp, nil, "")
-		if err != nil {
-			log.WithError(err).Errorf("Could not load job config from path %s at git ref %s", jobConfigTmp, ref)
-			return nil, err
-		}
-		// `config.Load` sets field `.JobBase.SourcePath` inside each job to the path from where the config was
-		// read, thus a deep equals can not succeed if two (otherwise identical) configs are read from different
-		// directories as we do here
-		// thus we need to reset the SourcePath to the original value for each job config
-		for _, presubmits := range pc.PresubmitsStatic {
-			for index, _ := range presubmits {
-				presubmits[index].JobBase.SourcePath = path.Join(git.Directory(), changedJobConfig)
-			}
-		}
-		configs[changedJobConfig] = pc
+	// TODO read job config (build link of it), if it is not nil, allowed to be
+	// load config, GetPresubmits / read static, filter them
+
+	// jobsConfigBase
+	// real - if prowLocation != "", then threat jobsConfigBase as folder
+	// build the link, if file exists read it, else it is not error, just warn, and no presubmits added
+
+	// unit tests - it used to filter what files changed to take from
+	// now we need to just read it i think (and unit tests need to pass the file name itself that can be cat-file)
+
+	// continue jobConfigTmp
+	_, err = writeTempFile(log, tmpdir, jobConfigBytes)
+	if err != nil {
+		log.WithError(err).Infoln("Could not write temp file")
+		return nil, err
 	}
+
+	// pc, err := config.Load(prowConfigTmp, jobConfigTmp, nil, "")
+	// if err != nil {
+	// 	log.WithError(err).Errorf("Could not load job config from path %s at git ref %s", jobConfigTmp, ref)
+	// 	return nil, err
+	// }
+	// for _, presubmits := range pc.PresubmitsStatic {
+	// 	for index, _ := range presubmits {
+	// TODO filter here
+	// 		// presubmits[index].JobBase.SourcePath = path.Join(git.Directory(), changedJobConfig)
+	// 	}
+	// }
+
+	// TODO maybe we can use PresubmitsStatic once we read the files already ?
+	// because it merged them
+
+	/*
+		for _, changedJobConfig := range changedJobConfigs {
+			bytes, ret := catFile(log, git.Directory(), changedJobConfig, ref)
+			if ret == 128 {
+				// 128 means that the file was probably deleted in the PR or doesn't exists
+				// so to avoid an edge case where we need to take care of a null pointer, we
+				// generate an empty pc w/o jobs.
+				configs[changedJobConfig] = &config.Config{}
+				continue
+			} else if ret != 0 {
+				log.Errorf("Could not read job config from path %s at git ref: %s", changedJobConfig, ref)
+				return nil, fmt.Errorf("could not read job config from git ref")
+			}
+			jobConfigTmp, err := writeTempFile(log, tmpdir, bytes)
+			if err != nil {
+				log.WithError(err).Infoln("Could not write temp file")
+				return nil, err
+			}
+			pc, err := config.Load(prowConfigTmp, jobConfigTmp, nil, "")
+			if err != nil {
+				log.WithError(err).Errorf("Could not load job config from path %s at git ref %s", jobConfigTmp, ref)
+				return nil, err
+			}
+			// `config.Load` sets field `.JobBase.SourcePath` inside each job to the path from where the config was
+			// read, thus a deep equals can not succeed if two (otherwise identical) configs are read from different
+			// directories as we do here
+			// thus we need to reset the SourcePath to the original value for each job config
+			for _, presubmits := range pc.PresubmitsStatic {
+				for index, _ := range presubmits {
+					presubmits[index].JobBase.SourcePath = path.Join(git.Directory(), changedJobConfig)
+				}
+			}
+			configs[changedJobConfig] = pc
+		} */
 
 	return configs, nil
 }
 
 // modifiedJobConfigs generates an array of absolute paths for modified job configs
-func (h *GitHubEventsHandler) modifiedJobConfigs(changedFiles []string) ([]string, error) {
-	var absModifiedProwConfigs []string
-	for _, changedFile := range changedFiles {
-		if strings.HasPrefix(changedFile, h.jobsConfigBase) {
-			if strings.HasSuffix(changedFile, ".yaml") || strings.HasSuffix(changedFile, ".yml") {
-				log.Infof("A modified config found: %s", changedFile)
-				absModifiedProwConfigs = append(absModifiedProwConfigs, changedFile)
-			}
-		}
-		log.Debugf("Skipping file: %s. Not a Prow/Jobs config", changedFile)
-	}
-	return absModifiedProwConfigs, nil
-}
+// func (h *GitHubEventsHandler) modifiedJobConfigs(changedFiles []string) ([]string, error) {
+// 	var absModifiedProwConfigs []string
+// 	for _, changedFile := range changedFiles {
+// 		if strings.HasPrefix(changedFile, h.jobsConfigBase) {
+// 			if strings.HasSuffix(changedFile, ".yaml") || strings.HasSuffix(changedFile, ".yml") {
+// 				log.Infof("A modified config found: %s", changedFile)
+// 				absModifiedProwConfigs = append(absModifiedProwConfigs, changedFile)
+// 			}
+// 		}
+// 		log.Debugf("Skipping file: %s. Not a Prow/Jobs config", changedFile)
+// 	}
+// 	return absModifiedProwConfigs, nil
+// }
 
-func jobKeyFunc(repo string, presubmit config.JobBase) string {
-	return fmt.Sprintf("%s#%s", repo, presubmit.Name)
-}
+// func jobKeyFunc(repo string, presubmit config.JobBase) string {
+// 	return fmt.Sprintf("%s#%s", repo, presubmit.Name)
+// }
 
-func repoFromJobKey(jobKey string) string {
-	s := strings.Split(jobKey, "#")
-	r := s[:1]
-	return strings.Join(r, "/")
-}
+// func repoFromJobKey(jobKey string) string {
+// 	s := strings.Split(jobKey, "#")
+// 	r := s[:1]
+// 	return strings.Join(r, "/")
+// }
 
-func hashPeriodicsConfig(periodics []config.Periodic) map[string]config.Periodic {
-	p := map[string]config.Periodic{}
-	for _, periodic := range periodics {
-		p[periodic.JobBase.Name] = periodic
-	}
-	return p
-}
+// func hashPeriodicsConfig(periodics []config.Periodic) map[string]config.Periodic {
+// 	p := map[string]config.Periodic{}
+// 	for _, periodic := range periodics {
+// 		p[periodic.JobBase.Name] = periodic
+// 	}
+// 	return p
+// }
 
-func hashPresubmitsConfig(presubmits map[string][]config.Presubmit) map[string]config.Presubmit {
-	presubmitsFlat := map[string]config.Presubmit{}
-	for repo, presubmitsForRepo := range presubmits {
-		for _, presubmit := range presubmitsForRepo {
-			presubmitsFlat[jobKeyFunc(repo, presubmit.JobBase)] = presubmit
-		}
-	}
-	return presubmitsFlat
-}
+// func hashPresubmitsConfig(presubmits map[string][]config.Presubmit) map[string]config.Presubmit {
+// 	presubmitsFlat := map[string]config.Presubmit{}
+// 	for repo, presubmitsForRepo := range presubmits {
+// 		for _, presubmit := range presubmitsForRepo {
+// 			presubmitsFlat[jobKeyFunc(repo, presubmit.JobBase)] = presubmit
+// 		}
+// 	}
+// 	return presubmitsFlat
+// }
 
 // catFile executes a git cat-file command in the specified git dir and returns bytes representation of the file
 func catFile(log *logrus.Logger, gitDir, file, refspec string) ([]byte, int) {
@@ -583,22 +602,22 @@ func writeTempFile(log *logrus.Logger, basedir string, content []byte) (string, 
 	return tmpfile.Name(), nil
 }
 
-func makeTargetRepoRefs(refs []prowapi.Refs, org, repo, ref string) prowapi.Refs {
-	return prowapi.Refs{
-		Repo:    repo,
-		Org:     org,
-		WorkDir: !workdirAlreadyDefined(refs),
-		BaseRef: ref,
-	}
-}
+// func makeTargetRepoRefs(refs []prowapi.Refs, org, repo, ref string) prowapi.Refs {
+// 	return prowapi.Refs{
+// 		Repo:    repo,
+// 		Org:     org,
+// 		WorkDir: !workdirAlreadyDefined(refs),
+// 		BaseRef: ref,
+// 	}
+// }
 
-func workdirAlreadyDefined(refs []prowapi.Refs) bool {
-	exists := false
-	for _, ref := range refs {
-		exists = exists || ref.WorkDir
-	}
-	return exists
-}
+// func workdirAlreadyDefined(refs []prowapi.Refs) bool {
+// 	exists := false
+// 	for _, ref := range refs {
+// 		exists = exists || ref.WorkDir
+// 	}
+// 	return exists
+// }
 
 func discoverHeadBranchName(org, repo, cloneURI string) (string, error) {
 	sourceURL := fmt.Sprintf("https://github.com/%s/%s.git", org, repo)
@@ -630,3 +649,51 @@ func discoverHeadBranchName(org, repo, cloneURI string) (string, error) {
 	}
 	return headBranch, nil
 }
+
+func fetchRemoteFile(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP request failed with status: %v", resp.Status)
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return body, nil
+}
+
+// func getPresubmits(log *logrus.Entry, gc gitv2.ClientFactory, cfg *config.Config, orgRepo string, baseSHAGetter, headSHAGetter config.RefGetter) []config.Presubmit {
+// 	presubmits, err := cfg.GetPresubmits(gc, orgRepo, baseSHAGetter, headSHAGetter)
+// 	if err != nil {
+// 		// Fall back to static presubmits to avoid deadlocking when a presubmit is used to verify
+// 		// inrepoconfig. Tide will still respect errors here and not merge.
+// 		log.WithError(err).Debug("Failed to get presubmits")
+// 		presubmits = cfg.GetPresubmitsStatic(orgRepo)
+// 	}
+// 	return presubmits
+// }
+
+// baseSHAGetter := func() (string, error) {
+// 	var err error
+// 	baseSHA, err = h.ghClient.GetRef(org, repo, "heads/"+pr.PullRequest.Base.Ref)
+// 	if err != nil {
+// 		return "", fmt.Errorf("failed to get baseSHA: %w", err)
+// 	}
+// 	return baseSHA, nil
+// }
+
+// headSHAGetter := func() (string, error) {
+// 	return pr.PullRequest.Head.SHA, nil
+// }
+
+// presubmits := getPresubmits(c.Logger, h.ghClient, c.Config, org+"/"+repo, baseSHAGetter, headSHAGetter)
+// if len(presubmits) == 0 {
+// 	return nil
+// }

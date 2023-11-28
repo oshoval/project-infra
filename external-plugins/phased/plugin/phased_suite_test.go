@@ -7,7 +7,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-func TestRehearse(t *testing.T) {
+func TestPhased(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Rehearse Suite")
+	RunSpecs(t, "Phased Suite")
 }

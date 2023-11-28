@@ -3,7 +3,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "go_default_library",
     srcs = ["handler.go"],
-    importpath = "kubevirt.io/project-infra/external-plugins/rehearse/plugin/handler",
+    importpath = "kubevirt.io/project-infra/external-plugins/phased/plugin/handler",
     visibility = ["//visibility:public"],
     deps = [
         "@com_github_go_git_go_git_v5//:go_default_library",

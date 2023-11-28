@@ -10,7 +10,7 @@ import (
 	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/pluginhelp"
 
-	"kubevirt.io/project-infra/external-plugins/rehearse/plugin/handler"
+	"kubevirt.io/project-infra/external-plugins/phased/plugin/handler"
 
 	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/rest"
@@ -23,7 +23,7 @@ import (
 	"k8s.io/test-infra/prow/interrupts"
 	"k8s.io/test-infra/prow/pluginhelp/externalplugins"
 
-	"kubevirt.io/project-infra/external-plugins/rehearse/plugin/server"
+	"kubevirt.io/project-infra/external-plugins/phased/plugin/server"
 )
 
 type options struct {
@@ -35,8 +35,8 @@ type options struct {
 	jobsConfigBase string
 	kubeconfig     string
 	jobsNs         string
-	alwaysRun      bool
 	cacheDir       string
+	prowLocation   string
 	github         prowflagutil.GitHubOptions
 }
 
@@ -53,6 +53,9 @@ func (o *options) validate() {
 	}
 	if o.cacheDir == "" {
 		errs = append(errs, fmt.Errorf("cache-dir can't be empty"))
+	}
+	if o.prowLocation == "" {
+		errs = append(errs, fmt.Errorf("prow-location can't be empty"))
 	}
 	err := o.github.Validate(o.dryRun)
 	if err != nil {
@@ -102,14 +105,14 @@ func gatherOptions() *options {
 		"jobs-namespace",
 		"",
 		"The namespace in which Prow jobs should be created.")
-	fs.BoolVar(&o.alwaysRun,
-		"always-run",
-		false,
-		"If set to true, will act on new and updated PRs. Otherwise, act only on comments.")
 	fs.StringVar(&o.cacheDir,
 		"cache-dir",
 		"",
 		"Directory to store git repos cache in.")
+	fs.StringVar(&o.prowLocation,
+		"prow-location",
+		"https://raw.githubusercontent.com/kubevirt/project-infra/main",
+		"Prow raw git location, can be local git folder")
 	for _, group := range []flagutil.OptionGroup{&o.github} {
 		group.AddFlags(fs)
 	}
@@ -161,7 +164,7 @@ func main() {
 		githubClient,
 		opts.prowConfigPath,
 		opts.jobsConfigBase,
-		opts.alwaysRun,
+		opts.prowLocation,
 		gitClientFactory)
 
 	eventsServer := server.NewGitHubEventsServer(secret.GetTokenGenerator(opts.hmacSecretFile), eventsHandler)
@@ -173,20 +176,13 @@ func main() {
 	logger.Infoln("Events server is listening on port:", opts.port)
 	externalplugins.ServeExternalPluginHelp(serverMux, logger.WithField("plugin-help", ""), helpProvider)
 	interrupts.WaitForGracefulShutdown()
-	logger.Println("Rehearse server was gracefully shut down")
+	logger.Println("Phased server was gracefully shut down")
 }
 
 func helpProvider(_ []config.OrgRepo) (*pluginhelp.PluginHelp, error) {
 	pluginHelp := &pluginhelp.PluginHelp{
-		Description: `The rehearse plugin is used to test modifications of Prow jobs to provide pre-merge feedback.`,
+		Description: `The Phased plugin is used to trigger phase 2 jobs when PR is ready for merging.`,
 	}
-	pluginHelp.AddCommand(pluginhelp.Command{
-		Usage:       "/rehearse [all|job-name|?]",
-		Description: "Rehearses modified Prow jobs inside a pull request.",
-		Featured:    true,
-		WhoCanUse:   "Project members",
-		Examples:    []string{"/rehearse", "/rehearse all", "/rehearse job-name", "/rehearse ?"},
-	})
 	return pluginHelp, nil
 }
 

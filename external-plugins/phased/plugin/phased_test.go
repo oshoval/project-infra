@@ -28,7 +28,6 @@ var _ = Describe("Phased", func() {
 
 		BeforeEach(func() {
 			var err error
-
 			gitrepo, gitClientFactory, err = localgit.NewV2()
 			Expect(err).ShouldNot(HaveOccurred())
 		})
@@ -61,9 +60,6 @@ var _ = Describe("Phased", func() {
 									{
 										JobBase: config.JobBase{
 											Name: "modified-job",
-											Annotations: map[string]string{
-												"rehearsal.allowed": "true",
-											},
 											Spec: &v1.PodSpec{
 												Containers: []v1.Container{
 													{
@@ -76,9 +72,6 @@ var _ = Describe("Phased", func() {
 									{
 										JobBase: config.JobBase{
 											Name: "existing-job",
-											Annotations: map[string]string{
-												"rehearsal.allowed": "true",
-											},
 											Spec: &v1.PodSpec{
 												Containers: []v1.Container{
 													{
@@ -110,9 +103,6 @@ var _ = Describe("Phased", func() {
 									{
 										JobBase: config.JobBase{
 											Name: "modified-job",
-											Annotations: map[string]string{
-												"rehearsal.allowed": "true",
-											},
 											Spec: &v1.PodSpec{
 												Containers: []v1.Container{
 													{
@@ -125,9 +115,6 @@ var _ = Describe("Phased", func() {
 									{
 										JobBase: config.JobBase{
 											Name: "existing-job",
-											Annotations: map[string]string{
-												"rehearsal.allowed": "true",
-											},
 											Spec: &v1.PodSpec{
 												Containers: []v1.Container{
 													{
@@ -194,7 +181,7 @@ var _ = Describe("Phased", func() {
 					}
 				})
 
-				By("Sending the event to the rehearsal server", func() {
+				By("Sending the event to the phased plugin server", func() {
 
 					prowc := &fake.FakeProwV1{
 						Fake: &testing.Fake{},

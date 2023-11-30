@@ -17,21 +17,7 @@ import (
 	"k8s.io/test-infra/prow/pjutil"
 )
 
-// const basicHelpCommentText = `You can trigger rehearsal for all jobs by commenting either ` + "`/rehearse`" + ` or ` + "`/rehearse all`" + `
-// on this PR.
-
-// For a specific PR you can comment ` + "`/rehearse {job-name}`" + `.
-
-// For a list of jobs that you can rehearse you can comment ` + "`/rehearse ?`" + `.`
-
 var log *logrus.Logger
-
-// // rehearseCommentRe matches either the sole command, i.e.
-// // /rehearse
-// // or the command followed by a job name which we then extract by the
-// // capturing group, i.e.
-// // /rehearse job-name
-// var rehearseCommentRe = regexp.MustCompile(`(?m)^/rehearse\s*?($|\s.*)`)
 
 func init() {
 	log = logrus.New()
@@ -80,7 +66,6 @@ func NewGitHubEventsHandler(
 }
 
 type githubClientInterface interface {
-	IsMember(string, string) (bool, error)
 	GetPullRequest(string, string, int) (*github.PullRequest, error)
 	CreateComment(org, repo string, number int, comment string) error
 	GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error)
@@ -113,13 +98,6 @@ func (h *GitHubEventsHandler) shouldActOnPREvent(event *github.PullRequestEvent)
 }
 
 func (h *GitHubEventsHandler) handlePullRequestUpdateEvent(log *logrus.Entry, event *github.PullRequestEvent) {
-	// TODO remove
-	// defer func() {
-	// 	if r := recover(); r != nil {
-	// 		h.logger.Warnf("Recovered during handling of a pull request event: %s", event.GUID)
-	// 	}
-	// }()
-
 	log.Infof("Handling updated pull request: %s [%d]", event.Repo.FullName, event.PullRequest.Number)
 
 	if !h.shouldActOnPREvent(event) {
@@ -127,32 +105,33 @@ func (h *GitHubEventsHandler) handlePullRequestUpdateEvent(log *logrus.Entry, ev
 		return
 	}
 
-	// TODO maybe needed for additional fields ?
-	// pr, err := h.ghClient.GetPullRequest(org, repo, event.PullRequest.Number)
-	// if err != nil {
-	// 	log.WithError(err).Errorf("Could not get PR number %d", event.PullRequest.Number)
-	// }
+	// TODO add labels filter
 
-	// TODO add the logic of labels
-
-	pr := event.PullRequest
-	org, repo, err := gitv2.OrgRepo(pr.Base.Repo.FullName)
+	org, repo, err := gitv2.OrgRepo(event.Repo.FullName)
 	if err != nil {
-		log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
+		log.WithError(err).Errorf("Could not get org/repo from the event")
 		return
 	}
-	log.Infoln("Generating git client")
+
+	pr, err := h.ghClient.GetPullRequest(org, repo, event.PullRequest.Number)
+	if err != nil {
+		log.WithError(err).Errorf("Could not get PR number %d", event.PullRequest.Number)
+		return
+	}
+
 	git, err := h.gitClientFactory.ClientFor(org, repo)
 	if err != nil {
+		log.WithError(err).Errorf("Could not get client for git")
 		return
 	}
 
-	// TODO move to other func
-	_, err = h.loadPresubmits(git, pr)
+	_, err = h.loadPresubmits(git, *pr)
 	if err != nil {
-		//log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
+		log.WithError(err).Errorf("loadPresubmits failed")
 		return
 	}
+
+	// TODD add rest of the logic here
 }
 
 func (h *GitHubEventsHandler) loadPresubmits(git gitv2.RepoClient, pr github.PullRequest) ([]config.Presubmit, error) {
@@ -163,10 +142,20 @@ func (h *GitHubEventsHandler) loadPresubmits(git gitv2.RepoClient, pr github.Pul
 	}
 	defer os.RemoveAll(tmpdir)
 
+	org, repo, err := gitv2.OrgRepo(pr.Base.Repo.FullName)
+	if err != nil {
+		log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
+		return nil, err
+	}
+
 	// TODO REMOVE
 	// h.prowLocation = "https://raw.githubusercontent.com/kubevirt/project-infra/main"
 	// h.prowConfigPath = "github/ci/prow-deploy/kustom/base/configs/current/config/config.yaml"
 	// h.jobsConfigBase = "github/ci/prow-deploy/files/jobs"
+
+	// TODO REMOVE
+	// org = "kubevirt"
+	// repo = "kubevirt"
 
 	var prowConfigBytes, jobConfigBytes []byte
 	prowLocation := h.prowLocation
@@ -174,12 +163,15 @@ func (h *GitHubEventsHandler) loadPresubmits(git gitv2.RepoClient, pr github.Pul
 		// TODO or unit tests, unless we create a dedicated unit tests folder(s)
 		prowLocation = git.Directory()
 		ret := 0
+		// TODO think about the 128 not found
 		prowConfigBytes, ret = catFile(log, prowLocation, h.prowConfigPath, "HEAD")
 		if ret != 0 && ret != 128 {
 			log.WithError(err).Errorf("Could not load Prow config %s", h.prowConfigPath)
 			return nil, err
 		}
 
+		// TODO maybe we can do that also on unit tests jobsConfigBase wil be the base
+		// and there will be a file based on org/repo/repo-presubmit there as in real
 		jobConfigBytes, ret = catFile(log, prowLocation, h.jobsConfigBase, "HEAD")
 		if ret != 0 && ret != 128 {
 			log.WithError(err).Errorf("Could not load Prow config %s", h.jobsConfigBase)
@@ -190,17 +182,6 @@ func (h *GitHubEventsHandler) loadPresubmits(git gitv2.RepoClient, pr github.Pul
 		prowConfigBytes, err = fetchRemoteFile(prowConfigUrl)
 		if err != nil {
 			log.WithError(err).Errorf("Could not fetch prow config from %s", prowConfigUrl)
-			return nil, err
-		}
-
-		org, repo, err := gitv2.OrgRepo(pr.Base.Repo.FullName)
-
-		// TODO REMOVE
-		// org = "kubevirt"
-		// repo = "kubevirt"
-
-		if err != nil {
-			log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
 			return nil, err
 		}
 
@@ -213,6 +194,7 @@ func (h *GitHubEventsHandler) loadPresubmits(git gitv2.RepoClient, pr github.Pul
 		// for example kubevirt-presubmits-1.1.yaml will belong to release-1.1
 		jobConfigUrl := prowLocation + "/" + h.jobsConfigBase + "/" + org + "/" +
 			repo + "/" + repo + "-presubmits" + branchAddon + ".yaml"
+
 		jobConfigBytes, err = fetchRemoteFile(jobConfigUrl)
 		if err != nil {
 			log.WithError(err).Errorf("Could not fetch prow config from %s", jobConfigUrl)
@@ -238,9 +220,12 @@ func (h *GitHubEventsHandler) loadPresubmits(git gitv2.RepoClient, pr github.Pul
 		return nil, err
 	}
 
+	orgRepo := org + "/" + repo
 	var presumbits []config.Presubmit
-	// TODO maybe need to filter about key = org/repo (kubevirt/kubevirt) because prow config might have stuff of other branches
-	for _, jobs := range pc.PresubmitsStatic {
+	for index, jobs := range pc.PresubmitsStatic {
+		if index != orgRepo {
+			continue
+		}
 		for _, job := range jobs {
 			presumbits = append(presumbits, job)
 			// TODO REMOVE
@@ -248,163 +233,11 @@ func (h *GitHubEventsHandler) loadPresubmits(git gitv2.RepoClient, pr github.Pul
 		}
 	}
 
-	//panic("bla")
 	// REMOVE
 	err = listRequiredManual(h.ghClient, pr, presumbits)
 
 	return presumbits, nil
 }
-
-/*
-func (h *GitHubEventsHandler) loadConfigsAtRef(git gitv2.RepoClient, pr *github.PullRequest) (map[string]*config.Config, error) {
-	configs := map[string]*config.Config{}
-
-	tmpdir, err := ioutil.TempDir("", "prow-configs")
-	if err != nil {
-		log.WithError(err).Error("Could not create a temp directory to store configs.")
-		return nil, err
-	}
-	defer os.RemoveAll(tmpdir)
-	// In order to actually support multi-threaded access to the git repo, we can't checkout any refs or assume that
-	// the repo is checked out with any refspec. Instead, we use git cat-file to read the files that we need to the
-	// memory and write them to a temp file. We need the temp file because the current version of Prow's config module
-	// can't load the configs from the memory.
-
-	// TODO must change git.Directory() to be the project-infra directory,
-	// but maybe catFile cant work on remote ? and then we need some remote cat
-
-	// need to http fetch
-	// but what about unit tests ? they can use catFile but need to determine
-	// maybe according git.Directory(), on unit tests its /tmp/gitrepo2772208634
-	// strive to make it param, that either can be http or not, and check according that
-	// if git.Directory() != "" {
-	// 	panic(fmt.Sprintf("Panic: %s", git.Directory()))
-	// }
-
-	var prowConfigBytes, jobConfigBytes []byte
-	prowLocation := h.prowLocation
-	if prowLocation == "" {
-		// TODO or unit tests, unless we create a dedicated unit tests folder(s)
-		prowLocation = git.Directory()
-		ret := 0
-		prowConfigBytes, ret = catFile(log, prowLocation, h.prowConfigPath, "HEAD")
-		if ret != 0 && ret != 128 {
-			log.WithError(err).Errorf("Could not load Prow config %s", h.prowConfigPath)
-			return nil, err
-		}
-
-		jobConfigBytes, ret = catFile(log, prowLocation, h.jobsConfigBase, "HEAD")
-		if ret != 0 && ret != 128 {
-			log.WithError(err).Errorf("Could not load Prow config %s", h.jobsConfigBase)
-			return nil, err
-		}
-	} else {
-		prowConfigUrl := prowLocation + "/" + h.prowConfigPath
-		prowConfigBytes, err = fetchRemoteFile(prowConfigUrl)
-		if err != nil {
-			log.WithError(err).Errorf("Could not fetch prow config from %s", prowConfigUrl)
-			return nil, err
-		}
-
-		org, repo, err := gitv2.OrgRepo(pr.Base.Repo.FullName)
-		if err != nil {
-			log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
-			return nil, err
-		}
-
-		branchAddon := ""
-		if strings.HasPrefix(pr.Base.Ref, "release") {
-			branchAddon = "-" + strings.TrimPrefix(pr.Base.Ref, "release")
-		}
-
-		// NOTE: only bracnhes main / master and release-<number> are supported, and must be yaml files (not yml)
-		// for example kubevirt-presubmits-1.1.yaml will belong to release-1.1
-		jobConfigUrl := prowLocation + "/" + h.jobsConfigBase + "/" + org + "/" +
-			repo + "/" + repo + "-presubmits" + branchAddon + ".yaml"
-		jobConfigBytes, err = fetchRemoteFile(jobConfigUrl)
-		if err != nil {
-			log.WithError(err).Errorf("Could not fetch prow config from %s", jobConfigUrl)
-			return nil, err
-		}
-	}
-
-	prowConfigTmp, err := writeTempFile(log, tmpdir, prowConfigBytes)
-	if err != nil {
-		log.WithError(err).Errorf("Could not write temporary Prow config.")
-		return nil, err
-	}
-
-	// TODO read job config (build link of it), if it is not nil, allowed to be
-	// load config, GetPresubmits / read static, filter them
-
-	// jobsConfigBase
-	// real - if prowLocation != "", then threat jobsConfigBase as folder
-	// build the link, if file exists read it, else it is not error, just warn, and no presubmits added
-
-	// unit tests - it used to filter what files changed to take from
-	// now we need to just read it i think (and unit tests need to pass the file name itself that can be cat-file)
-
-	jobConfigTmp, err := writeTempFile(log, tmpdir, jobConfigBytes)
-	if err != nil {
-		log.WithError(err).Infoln("Could not write temp file")
-		return nil, err
-	}
-
-	pc, err := config.Load(prowConfigTmp, jobConfigTmp, nil, "")
-	if err != nil {
-		log.WithError(err).Errorf("Could not load prow config")
-		return nil, err
-	}
-
-	var presumbits []config.Presubmit
-	for _, jobs := range pc.PresubmitsStatic {
-		for _, job := range jobs {
-			presumbits = append(presumbits, job)
-		}
-	}
-
-	err = listRequiredManual(h.ghClient, pr, presumbits)
-
-	// TODO maybe we can use PresubmitsStatic once we read the files already ?
-	// because it merged them
-	// presubmits = cfg.GetPresubmitsStatic(orgRepo) or not because it need more annoying funcs
-
-	// for _, changedJobConfig := range changedJobConfigs {
-	// 	bytes, ret := catFile(log, git.Directory(), changedJobConfig, ref)
-	// 	if ret == 128 {
-	// 		// 128 means that the file was probably deleted in the PR or doesn't exists
-	// 		// so to avoid an edge case where we need to take care of a null pointer, we
-	// 		// generate an empty pc w/o jobs.
-	// 		configs[changedJobConfig] = &config.Config{}
-	// 		continue
-	// 	} else if ret != 0 {
-	// 		log.Errorf("Could not read job config from path %s at git ref: %s", changedJobConfig, ref)
-	// 		return nil, fmt.Errorf("could not read job config from git ref")
-	// 	}
-	// 	jobConfigTmp, err := writeTempFile(log, tmpdir, bytes)
-	// 	if err != nil {
-	// 		log.WithError(err).Infoln("Could not write temp file")
-	// 		return nil, err
-	// 	}
-	// 	pc, err := config.Load(prowConfigTmp, jobConfigTmp, nil, "")
-	// 	if err != nil {
-	// 		log.WithError(err).Errorf("Could not load job config from path %s at git ref %s", jobConfigTmp, ref)
-	// 		return nil, err
-	// 	}
-	// 	// `config.Load` sets field `.JobBase.SourcePath` inside each job to the path from where the config was
-	// 	// read, thus a deep equals can not succeed if two (otherwise identical) configs are read from different
-	// 	// directories as we do here
-	// 	// thus we need to reset the SourcePath to the original value for each job config
-	// 	for _, presubmits := range pc.PresubmitsStatic {
-	// 		for index, _ := range presubmits {
-	// 			presubmits[index].JobBase.SourcePath = path.Join(git.Directory(), changedJobConfig)
-	// 		}
-	// 	}
-	// 	configs[changedJobConfig] = pc
-	// }
-
-	return configs, nil
-} */
 
 // catFile executes a git cat-file command in the specified git dir and returns bytes representation of the file
 func catFile(log *logrus.Logger, gitDir, file, refspec string) ([]byte, int) {
@@ -471,6 +304,7 @@ func listRequested(ghClient githubClientInterface, pr github.PullRequest, reques
 		return err
 	}
 
+	// Note: instead reading config and allowing only "require_manually_triggered_jobs" repos
 	if !(org == "kubevirt" && repo == "kubevirt") && !(org == "foo" && repo == "bar") {
 		return nil
 	}
@@ -500,6 +334,7 @@ func listRequested(ghClient githubClientInterface, pr github.PullRequest, reques
 }
 
 func manualRequiredFilter(p config.Presubmit) (bool, bool, bool) {
-	return !p.Optional && !p.AlwaysRun && p.RegexpChangeMatcher.RunIfChanged == "" && p.RegexpChangeMatcher.SkipIfOnlyChanged == "",
-		!p.Optional && !p.AlwaysRun && p.RegexpChangeMatcher.RunIfChanged == "" && p.RegexpChangeMatcher.SkipIfOnlyChanged == "", false
+	cond := !p.Optional && !p.AlwaysRun && p.RegexpChangeMatcher.RunIfChanged == "" &&
+		p.RegexpChangeMatcher.SkipIfOnlyChanged == ""
+	return cond, cond, false
 }

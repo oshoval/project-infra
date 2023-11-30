@@ -163,6 +163,7 @@ var _ = Describe("Rehearse", func() {
 				})
 				By("Generating a fake pull request event and registering it to the github client", func() {
 					event = github.PullRequestEvent{
+						// TODO should be fine
 						Action: github.PullRequestActionOpened,
 						GUID:   "guid",
 						Repo: github.Repo{
@@ -709,7 +710,8 @@ var _ = Describe("Rehearse", func() {
 
 		Context("ok-to-test label is set", func() {
 
-			It("Should generate Prow jobs for the changed configs with ok-to-test label", func() {
+			// TODO remove F
+			FIt("Should generate Prow jobs for the changed configs with ok-to-test label", func() {
 
 				By("Creating a fake git repo", func() {
 					makeRepoWithEmptyProwConfig(gitrepo, "foo", "bar")
@@ -818,7 +820,7 @@ var _ = Describe("Rehearse", func() {
 				testuser := "testuser"
 				By("Generating a fake pull request event and registering it to the github client", func() {
 					event = github.PullRequestEvent{
-						Action: github.PullRequestActionOpened,
+						Action: github.PullRequestActionLabeled,
 						GUID:   "guid",
 						Repo: github.Repo{
 							FullName: "foo/bar",
@@ -857,34 +859,34 @@ var _ = Describe("Rehearse", func() {
 					}
 				})
 
-				// By("Sending the event to the rehearsal server", func() {
+				By("Sending the event to the rehearsal server", func() {
 
-				// 	prowc := &fake.FakeProwV1{
-				// 		Fake: &testing.Fake{},
-				// 	}
-				// 	fakelog := logrus.New()
-				// 	eventsChan := make(chan *handler.GitHubEvent)
-				// 	eventsHandler := handler.NewGitHubEventsHandler(
-				// 		eventsChan,
-				// 		fakelog,
-				// 		prowc.ProwJobs("test-ns"),
-				// 		gh,
-				// 		"prowconfig.yaml",
-				// 		"",
-				// 		gitClientFactory)
+					prowc := &fake.FakeProwV1{
+						Fake: &testing.Fake{},
+					}
+					fakelog := logrus.New()
+					eventsChan := make(chan *handler.GitHubEvent)
+					eventsHandler := handler.NewGitHubEventsHandler(
+						eventsChan,
+						fakelog,
+						prowc.ProwJobs("test-ns"),
+						gh,
+						"prowconfig.yaml",
+						"jobs-config.yaml",
+						"",
+						gitClientFactory)
 
-				// 	handlerEvent, err := makeHandlerPullRequestEvent(&event)
-				// 	Expect(err).ShouldNot(HaveOccurred())
+					handlerEvent, err := makeHandlerPullRequestEvent(&event)
+					Expect(err).ShouldNot(HaveOccurred())
 
-				// 	eventsHandler.Handle(handlerEvent)
+					eventsHandler.Handle(handlerEvent)
 
-				// 	By("Inspecting the response and the actions on the client", func() {
-
-				// 		Expect(prowc.Actions()).Should(HaveLen(1))
-				// 		pjAction := prowc.Actions()[0].GetResource()
-				// 		Expect(pjAction).To(Equal(prowapi.SchemeGroupVersion.WithResource("prowjobs")))
-				// 	})
-				// })
+					// By("Inspecting the response and the actions on the client", func() {
+					// 	Expect(prowc.Actions()).Should(HaveLen(1))
+					// 	pjAction := prowc.Actions()[0].GetResource()
+					// 	Expect(pjAction).To(Equal(prowapi.SchemeGroupVersion.WithResource("prowjobs")))
+					// })
+				})
 
 			})
 

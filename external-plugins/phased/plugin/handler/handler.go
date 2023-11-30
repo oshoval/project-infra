@@ -9,10 +9,6 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/go-git/go-git/v5"
-	gitconfig "github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/test-infra/prow/client/clientset/versioned/typed/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
@@ -117,10 +113,11 @@ func (h *GitHubEventsHandler) shouldActOnPREvent(event *github.PullRequestEvent)
 }
 
 func (h *GitHubEventsHandler) handlePullRequestUpdateEvent(log *logrus.Entry, event *github.PullRequestEvent) {
+	// TODO remove
 	// defer func() {
 	// 	if r := recover(); r != nil {
 	// 		h.logger.Warnf("Recovered during handling of a pull request event: %s", event.GUID)
-	// 	} // TODO remove
+	// 	}
 	// }()
 
 	log.Infof("Handling updated pull request: %s [%d]", event.Repo.FullName, event.PullRequest.Number)
@@ -130,18 +127,13 @@ func (h *GitHubEventsHandler) handlePullRequestUpdateEvent(log *logrus.Entry, ev
 		return
 	}
 
-	// org, repo, err := gitv2.OrgRepo(event.Repo.FullName)
-	// if err != nil {
-	// 	log.WithError(err).Errorf("Could not get org/repo from the event")
-	// }
-
+	// TODO maybe needed for additional fields ?
 	// pr, err := h.ghClient.GetPullRequest(org, repo, event.PullRequest.Number)
 	// if err != nil {
 	// 	log.WithError(err).Errorf("Could not get PR number %d", event.PullRequest.Number)
 	// }
 
 	// TODO add the logic of labels
-	// TODO change name
 
 	pr := event.PullRequest
 	org, repo, err := gitv2.OrgRepo(pr.Base.Repo.FullName)
@@ -155,264 +147,13 @@ func (h *GitHubEventsHandler) handlePullRequestUpdateEvent(log *logrus.Entry, ev
 		return
 	}
 
-	// TODO remove
+	// TODO move to other func
 	_, err = h.loadPresubmits(git, pr)
 	if err != nil {
-		panic("loadPresubmits err != nil")
+		//log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
+		return
 	}
-	// } else {
-	// 	panic("here2")
-	// }
-
-	//h.handleRehearsalForPR(log, &event.PullRequest, "")
 }
-
-/*
-func (h *GitHubEventsHandler) handleRehearsalForPR(log *logrus.Entry, pr *github.PullRequest, commentBody string) {
-	// org, repo, err := gitv2.OrgRepo(pr.Base.Repo.FullName)
-	// if err != nil {
-	// 	log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
-	// 	return
-	// }
-	// log.Infoln("Generating git client")
-	// git, err := h.gitClientFactory.ClientFor(org, repo)
-	// if err != nil {
-	// 	return
-	// }
-
-	// log.Infoln("Rebasing the PR on the target branch")
-	// git.Config("user.email", "kubevirtbot@redhat.com")
-	// git.Config("user.name", "Kubevirt Bot")
-	// err = git.MergeAndCheckout(pr.Base.SHA, string(github.MergeSquash), pr.Head.SHA)
-	// if err != nil {
-	// 	log.WithError(err).Error("Could not rebase the PR on the target branch.")
-	// 	return
-	// }
-	// log.Infoln("Getting diff")
-	// changedFiles, err := git.Diff(pr.Base.SHA, "HEAD")
-	// if err != nil {
-	// 	log.WithError(err).Error("Could not calculate diff for PR.")
-	// 	return
-	// }
-	// log.Infoln("Changed files:", changedFiles)
-
-	// changedJobConfigs, err := h.modifiedJobConfigs(changedFiles)
-	// if err != nil {
-	// 	log.WithError(err).Error("Could not calculate absolute paths for modified job configs")
-	// 	return
-	// }
-	// log.Infoln("Changed job configs:", changedJobConfigs)
-
-	// headConfigs, err := h.loadConfigsAtRef(changedJobConfigs, git, "HEAD")
-	// if err != nil {
-	// 	log.WithError(err).Errorf(
-	// 		"Could not load job configs from head ref: %s", "HEAD")
-	// }
-
-	// baseConfigs, err := h.loadConfigsAtRef(changedJobConfigs, git, pr.Base.SHA)
-	// if err != nil {
-	// 	log.WithError(err).Errorf(
-	// 		"Could not load job configs from base ref: %s", pr.Base.SHA)
-	// }
-
-	// 	log.Infoln("Base configs:", baseConfigs)
-
-	// 	prowjobs := h.generateProwJobs(headConfigs, baseConfigs, pr, eventGUID)
-	// 	jobNames := h.extractJobNamesFromComment(commentBody)
-	// 	if len(jobNames) == 1 && jobNames[0] == "?" {
-	// 		var prowJobNames []string
-	// 		for _, prowJob := range prowjobs {
-	// 			prowJobNames = append(prowJobNames, prowJob.Spec.Job)
-	// 		}
-	// 		commentText := fmt.Sprintf(`Rehearsal is available for the following jobs in this PR:
-
-	// `+"```"+`
-	// %s
-	// `+"```"+`
-
-	// `+basicHelpCommentText, strings.Join(prowJobNames, "\n"))
-	// 		err := h.ghClient.CreateComment(org, repo, pr.Number, commentText)
-	// 		if err != nil {
-	// 			log.WithError(err).Errorf("Failed to create comment on %s/%s PR: %d", org, repo, pr.Number)
-	// 		}
-	// 		return
-	// 	}
-
-	// 	prowjobs = h.filterProwJobsByJobNames(prowjobs, jobNames)
-
-	// 	log.Infof("Will create %d jobs", len(prowjobs))
-	// 	var rehearsalsGenerated []string
-	// 	var rehearsalsFailed []string
-	// 	for _, job := range prowjobs {
-	// 		if job.Labels == nil {
-	// 			job.Labels = make(map[string]string)
-	// 		}
-	// 		job.Labels["rehearsal"] = "true"
-	// 		job.Labels["rehearsal-for-pull-request"] = strconv.Itoa(pr.Number)
-	// 		rehearsalName := strings.Join([]string{"rehearsal", job.Spec.Job}, "-")
-	// 		job.Spec.Job = rehearsalName
-	// 		job.Spec.Context = rehearsalName
-	// 		_, err := h.prowClient.Create(context.Background(), &job, metav1.CreateOptions{})
-	// 		if err != nil {
-	// 			rehearsalsFailed = append(rehearsalsFailed, rehearsalName)
-	// 			log.WithError(err).Errorf("Failed to create prow job: %s", job.Spec.Job)
-	// 			continue
-	// 		}
-	// 		rehearsalsGenerated = append(rehearsalsGenerated, rehearsalName)
-	// 		log.Infof("Created a rehearse job: %s", job.Name)
-	// 	}
-	// 	commentText := fmt.Sprintf(`Rehearsal jobs created for this PR:
-
-	// `+"```"+`
-	// %s
-	// `+"```"+`
-
-	// `+basicHelpCommentText, strings.Join(rehearsalsGenerated, "\n"))
-	// 	err = h.ghClient.CreateComment(org, repo, pr.Number, commentText)
-	// 	if err != nil {
-	// 		log.WithError(err).Errorf("Failed to create comment on %s/%s PR: %d", org, repo, pr.Number)
-	// 	}
-	// 	if len(rehearsalsFailed) > 0 {
-	// 		commentText = fmt.Sprintf(`Rehearsal jobs failed to create for this PR:
-
-	// `+"```"+`
-	// %s
-	// `+"```"+`
-
-	// `+basicHelpCommentText, strings.Join(rehearsalsFailed, "\n"))
-	// 		err = h.ghClient.CreateComment(org, repo, pr.Number, commentText)
-	// 		if err != nil {
-	// 			log.WithError(err).Errorf("Failed to create comment on %s/%s PR: %d", org, repo, pr.Number)
-	// 		}
-	// 	}
-}*/
-
-// func (h *GitHubEventsHandler) extractJobNamesFromComment(body string) []string {
-// 	if body == "" {
-// 		return nil
-// 	}
-// 	var jobNames []string
-// 	allStringSubmatch := rehearseCommentRe.FindAllStringSubmatch(body, -1)
-// 	for _, subMatches := range allStringSubmatch {
-// 		if len(subMatches) < 2 {
-// 			continue
-// 		}
-// 		trimmedJobName := strings.TrimSpace(subMatches[1])
-// 		if trimmedJobName == "" || trimmedJobName == "all" {
-// 			continue
-// 		}
-// 		jobNames = append(jobNames, trimmedJobName)
-// 	}
-// 	return jobNames
-// }
-
-// func (h *GitHubEventsHandler) filterProwJobsByJobNames(prowjobs []prowapi.ProwJob, jobNames []string) []prowapi.ProwJob {
-// 	if len(jobNames) == 0 {
-// 		return prowjobs
-// 	}
-// 	jobNamesToFilter := map[string]struct{}{}
-// 	for _, jobName := range jobNames {
-// 		jobNamesToFilter[jobName] = struct{}{}
-// 	}
-// 	var filteredProwJobs []prowapi.ProwJob
-// 	for _, prowjob := range prowjobs {
-// 		if _, exists := jobNamesToFilter[prowjob.Spec.Job]; !exists {
-// 			continue
-// 		}
-// 		filteredProwJobs = append(filteredProwJobs, prowjob)
-// 	}
-// 	return filteredProwJobs
-// }
-
-// const rehearsalRestrictedAnnotation = "rehearsal.restricted"
-
-// func rehearsalRestricted(job prowapi.ProwJob) bool {
-// 	annotations := job.GetAnnotations()
-// 	if annotations == nil {
-// 		return false
-// 	}
-// 	isRestricted, restrictedAnnotationExists := annotations[rehearsalRestrictedAnnotation]
-// 	return restrictedAnnotationExists && isRestricted == "true"
-// }
-
-// func (h *GitHubEventsHandler) generateProwJobs(
-// 	headConfigs, baseConfigs map[string]*config.Config, pr *github.PullRequest, eventGUID string) []prowapi.ProwJob {
-// 	var jobs []prowapi.ProwJob
-
-// 	for path, headConfig := range headConfigs {
-// 		baseConfig, _ := baseConfigs[path]
-// 		jobs = append(jobs, h.generatePresubmits(headConfig, baseConfig, pr, eventGUID)...)
-// 	}
-
-// 	return jobs
-// }
-
-/*
-func (h *GitHubEventsHandler) generatePresubmits(
-	headConfig, baseConfig *config.Config, pr *github.PullRequest, eventGUID string) []prowapi.ProwJob {
-	var jobs []prowapi.ProwJob
-
-	// We need to flatten the jobs because later on we need
-	// to calculate the modified jobs and it will make the lookup
-	// much more efficient.
-	headPresubmits := hashPresubmitsConfig(headConfig.PresubmitsStatic)
-	basePresubmits := hashPresubmitsConfig(baseConfig.PresubmitsStatic)
-
-	for presubmitKey, headPresubmit := range headPresubmits {
-		basePresubmit, exists := basePresubmits[presubmitKey]
-
-		if exists && reflect.DeepEqual(basePresubmit, headPresubmit) {
-			continue
-		}
-		log.Infof("Detected modified or new presubmit: %s.", headPresubmit.Name)
-		changelog, err := diff.Diff(basePresubmit, headPresubmit)
-		if err != nil {
-			log.Errorf("could not diff presubmits: %v", err)
-		}
-		log.Infof("differences detected:/n%v", changelog)
-
-		// respect the Branches configuration for the job, i.e. avoid always running against HEAD
-		branches := headPresubmit.Branches
-		if len(branches) == 0 {
-			branches = []string{"HEAD"}
-		}
-
-		// since we can have multiple branches we need to create one job per branch
-		for _, branch := range branches {
-			job := pjutil.NewPresubmit(*pr, pr.Base.SHA, headPresubmit, eventGUID, map[string]string{})
-
-			if rehearsalRestricted(job) {
-				h.logger.Infof("Skipping rehersal job for: %s because it is restricted", job.Name)
-				continue
-			}
-
-			repoOrg := repoFromJobKey(presubmitKey)
-			org, repo, err := gitv2.OrgRepo(repoOrg)
-			if err != nil {
-				log.Errorf(
-					"Could not extract repo and org from job key: %s. Job name: %s",
-					presubmitKey, headPresubmit.Name)
-			}
-
-			var targetBranchName string
-			if branch == "HEAD" {
-				targetBranchName, err = discoverHeadBranchName(org, repo, headPresubmit.CloneURI)
-				if err != nil {
-					targetBranchName = pr.Base.Ref
-				}
-			} else {
-				targetBranchName = branch
-			}
-
-			if repoOrg != pr.Base.Repo.FullName {
-				job.Spec.ExtraRefs = append(job.Spec.ExtraRefs, makeTargetRepoRefs(job.Spec.ExtraRefs, org, repo, targetBranchName))
-			}
-			jobs = append(jobs, job)
-		}
-	}
-	return jobs
-}
-*/
 
 func (h *GitHubEventsHandler) loadPresubmits(git gitv2.RepoClient, pr github.PullRequest) ([]config.Presubmit, error) {
 	tmpdir, err := ioutil.TempDir("", "prow-configs")
@@ -665,49 +406,6 @@ func (h *GitHubEventsHandler) loadConfigsAtRef(git gitv2.RepoClient, pr *github.
 	return configs, nil
 } */
 
-// modifiedJobConfigs generates an array of absolute paths for modified job configs
-// func (h *GitHubEventsHandler) modifiedJobConfigs(changedFiles []string) ([]string, error) {
-// 	var absModifiedProwConfigs []string
-// 	for _, changedFile := range changedFiles {
-// 		if strings.HasPrefix(changedFile, h.jobsConfigBase) {
-// 			if strings.HasSuffix(changedFile, ".yaml") || strings.HasSuffix(changedFile, ".yml") {
-// 				log.Infof("A modified config found: %s", changedFile)
-// 				absModifiedProwConfigs = append(absModifiedProwConfigs, changedFile)
-// 			}
-// 		}
-// 		log.Debugf("Skipping file: %s. Not a Prow/Jobs config", changedFile)
-// 	}
-// 	return absModifiedProwConfigs, nil
-// }
-
-// func jobKeyFunc(repo string, presubmit config.JobBase) string {
-// 	return fmt.Sprintf("%s#%s", repo, presubmit.Name)
-// }
-
-// func repoFromJobKey(jobKey string) string {
-// 	s := strings.Split(jobKey, "#")
-// 	r := s[:1]
-// 	return strings.Join(r, "/")
-// }
-
-// func hashPeriodicsConfig(periodics []config.Periodic) map[string]config.Periodic {
-// 	p := map[string]config.Periodic{}
-// 	for _, periodic := range periodics {
-// 		p[periodic.JobBase.Name] = periodic
-// 	}
-// 	return p
-// }
-
-// func hashPresubmitsConfig(presubmits map[string][]config.Presubmit) map[string]config.Presubmit {
-// 	presubmitsFlat := map[string]config.Presubmit{}
-// 	for repo, presubmitsForRepo := range presubmits {
-// 		for _, presubmit := range presubmitsForRepo {
-// 			presubmitsFlat[jobKeyFunc(repo, presubmit.JobBase)] = presubmit
-// 		}
-// 	}
-// 	return presubmitsFlat
-// }
-
 // catFile executes a git cat-file command in the specified git dir and returns bytes representation of the file
 func catFile(log *logrus.Logger, gitDir, file, refspec string) ([]byte, int) {
 	cmd := exec.Command("git", "-C", gitDir, "cat-file", "-p", fmt.Sprintf("%s:%s", refspec, file))
@@ -732,54 +430,6 @@ func writeTempFile(log *logrus.Logger, basedir string, content []byte) (string, 
 	return tmpfile.Name(), nil
 }
 
-// func makeTargetRepoRefs(refs []prowapi.Refs, org, repo, ref string) prowapi.Refs {
-// 	return prowapi.Refs{
-// 		Repo:    repo,
-// 		Org:     org,
-// 		WorkDir: !workdirAlreadyDefined(refs),
-// 		BaseRef: ref,
-// 	}
-// }
-
-// func workdirAlreadyDefined(refs []prowapi.Refs) bool {
-// 	exists := false
-// 	for _, ref := range refs {
-// 		exists = exists || ref.WorkDir
-// 	}
-// 	return exists
-// }
-
-func discoverHeadBranchName(org, repo, cloneURI string) (string, error) {
-	sourceURL := fmt.Sprintf("https://github.com/%s/%s.git", org, repo)
-	if cloneURI != "" {
-		sourceURL = cloneURI
-	}
-
-	// Create the remote with repository URL
-	rem := git.NewRemote(memory.NewStorage(), &gitconfig.RemoteConfig{
-		Name: "origin",
-		URLs: []string{sourceURL},
-	})
-
-	// We can then use every Remote functions to retrieve wanted information
-	refs, err := rem.List(&git.ListOptions{})
-	if err != nil {
-		return "", err
-	}
-
-	var headBranch string
-	for _, ref := range refs {
-		if ref.Type() == plumbing.SymbolicReference && ref.Name().String() == "HEAD" {
-			headBranch = strings.Split(ref.Target().String(), "/")[2]
-			break
-		}
-	}
-	if headBranch == "" {
-		headBranch = "master"
-	}
-	return headBranch, nil
-}
-
 func fetchRemoteFile(url string) ([]byte, error) {
 	resp, err := http.Get(url)
 	if err != nil {
@@ -799,35 +449,6 @@ func fetchRemoteFile(url string) ([]byte, error) {
 	return body, nil
 }
 
-// func getPresubmits(log *logrus.Entry, gc gitv2.ClientFactory, cfg *config.Config, orgRepo string, baseSHAGetter, headSHAGetter config.RefGetter) []config.Presubmit {
-// 	presubmits, err := cfg.GetPresubmits(gc, orgRepo, baseSHAGetter, headSHAGetter)
-// 	if err != nil {
-// 		// Fall back to static presubmits to avoid deadlocking when a presubmit is used to verify
-// 		// inrepoconfig. Tide will still respect errors here and not merge.
-// 		log.WithError(err).Debug("Failed to get presubmits")
-// 		presubmits = cfg.GetPresubmitsStatic(orgRepo)
-// 	}
-// 	return presubmits
-// }
-
-// baseSHAGetter := func() (string, error) {
-// 	var err error
-// 	baseSHA, err = h.ghClient.GetRef(org, repo, "heads/"+pr.PullRequest.Base.Ref)
-// 	if err != nil {
-// 		return "", fmt.Errorf("failed to get baseSHA: %w", err)
-// 	}
-// 	return baseSHA, nil
-// }
-
-// headSHAGetter := func() (string, error) {
-// 	return pr.PullRequest.Head.SHA, nil
-// }
-
-// presubmits := getPresubmits(c.Logger, h.ghClient, c.Config, org+"/"+repo, baseSHAGetter, headSHAGetter)
-// if len(presubmits) == 0 {
-// 	return nil
-// }
-
 func listRequiredManual(ghClient githubClientInterface, pr github.PullRequest, presubmits []config.Presubmit) error {
 	if pr.Draft {
 		return nil
@@ -844,11 +465,15 @@ func listRequiredManual(ghClient githubClientInterface, pr github.PullRequest, p
 }
 
 func listRequested(ghClient githubClientInterface, pr github.PullRequest, requestedJobs []config.Presubmit) error {
-	org, repo := orgRepoAuthor(pr)
-	// TODO return - it is a guard
-	// if !(org == "kubevirt" && repo == "kubevirt") && !(org == "foo" && repo == "bar") {
-	// 	return nil
-	// }
+	org, repo, err := gitv2.OrgRepo(pr.Base.Repo.FullName)
+	if err != nil {
+		log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
+		return err
+	}
+
+	if !(org == "kubevirt" && repo == "kubevirt") && !(org == "foo" && repo == "bar") {
+		return nil
+	}
 
 	// If the PR is not mergeable (e.g. due to merge conflicts), we will not trigger any jobs,
 	// to reduce the load on resources and reduce spam comments which will lead to a better review experience.
@@ -860,10 +485,12 @@ func listRequested(ghClient githubClientInterface, pr github.PullRequest, reques
 	for _, job := range requestedJobs {
 		result += "/test " + job.Name + "\n"
 		// REMOVE
-		log.Infof("DBG presubmit %s", job.Name)
+		//log.Infof("DBG presubmit %s", job.Name)
 	}
 
 	if result != "" {
+		// REMOVE
+		//log.Infof("DBG presubmit %s %s %d %s", org, repo, pr.Number, result)
 		if err := ghClient.CreateComment(org, repo, pr.Number, result); err != nil {
 			return err
 		}
@@ -875,10 +502,4 @@ func listRequested(ghClient githubClientInterface, pr github.PullRequest, reques
 func manualRequiredFilter(p config.Presubmit) (bool, bool, bool) {
 	return !p.Optional && !p.AlwaysRun && p.RegexpChangeMatcher.RunIfChanged == "" && p.RegexpChangeMatcher.SkipIfOnlyChanged == "",
 		!p.Optional && !p.AlwaysRun && p.RegexpChangeMatcher.RunIfChanged == "" && p.RegexpChangeMatcher.SkipIfOnlyChanged == "", false
-}
-
-func orgRepoAuthor(pr github.PullRequest) (string, string) {
-	org := pr.Base.Repo.Owner.Login
-	repo := pr.Base.Repo.Name
-	return org, repo
 }

@@ -2,7 +2,7 @@ package main_test
 
 import (
 	"encoding/json"
-	"os"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -15,6 +15,7 @@ import (
 	git2 "k8s.io/test-infra/prow/git/v2"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/github/fakegithub"
+	"k8s.io/test-infra/prow/labels"
 
 	"kubevirt.io/project-infra/external-plugins/phased/plugin/handler"
 )
@@ -35,12 +36,6 @@ var _ = Describe("Phased", func() {
 		AfterEach(func() {
 			if gitClientFactory != nil {
 				gitClientFactory.Clean()
-			}
-		})
-
-		AfterEach(func() {
-			if gitrepo != nil {
-				os.RemoveAll(gitrepo.Dir)
 			}
 		})
 
@@ -94,55 +89,16 @@ var _ = Describe("Phased", func() {
 					Expect(err).ShouldNot(HaveOccurred())
 				})
 
-				var headref string
-				By("Generating a head commit with a modified job", func() {
-					headConfig, err := json.Marshal(&config.Config{
-						JobConfig: config.JobConfig{
-							PresubmitsStatic: map[string][]config.Presubmit{
-								"foo/bar": {
-									{
-										JobBase: config.JobBase{
-											Name: "modified-job",
-											Spec: &v1.PodSpec{
-												Containers: []v1.Container{
-													{
-														Image: "modified-image",
-													},
-												},
-											},
-										},
-									},
-									{
-										JobBase: config.JobBase{
-											Name: "existing-job",
-											Spec: &v1.PodSpec{
-												Containers: []v1.Container{
-													{
-														Image: "other-image",
-													},
-												},
-											},
-										},
-									},
-								},
-							},
-						},
-					})
-					err = gitrepo.AddCommit("foo", "bar", map[string][]byte{
-						"jobs-config.yaml": headConfig,
-					})
-					Expect(err).ShouldNot(HaveOccurred())
-					headref, err = gitrepo.RevParse("foo", "bar", "HEAD")
-					Expect(err).ShouldNot(HaveOccurred())
-				})
-
 				gh := fakegithub.NewFakeClient()
 				var event github.PullRequestEvent
+
+				gh.IssueLabelsExisting = append(gh.IssueLabelsExisting, issueLabels(labels.Approved)...)
 
 				testuser := "testuser"
 				By("Generating a fake pull request event and registering it to the github client", func() {
 					event = github.PullRequestEvent{
 						Action: github.PullRequestActionLabeled,
+						Label:  github.Label{Name: labels.LGTM},
 						GUID:   "guid",
 						Repo: github.Repo{
 							FullName: "foo/bar",
@@ -152,11 +108,7 @@ var _ = Describe("Phased", func() {
 						},
 						PullRequest: github.PullRequest{
 							Number: 17,
-							Labels: []github.Label{
-								{
-									Name: "ok-to-test",
-								},
-							},
+							State:  "open",
 							Base: github.PullRequestBranch{
 								Repo: github.Repo{
 									Name:     "bar",
@@ -170,8 +122,8 @@ var _ = Describe("Phased", func() {
 									Name:     "bar",
 									FullName: "foo/bar",
 								},
-								Ref: headref,
-								SHA: headref,
+								Ref: baseref,
+								SHA: baseref,
 							},
 						},
 					}
@@ -203,7 +155,7 @@ var _ = Describe("Phased", func() {
 
 					eventsHandler.Handle(handlerEvent)
 
-					Expect(len(gh.IssueCommentsAdded)).To(Equal(1))
+					Expect(len(gh.IssueCommentsAdded)).To(Equal(1), "Expected github comment to be added")
 					Expect(gh.IssueCommentsAdded[0]).To(Equal("foo/bar#17:/test modified-job\n/test existing-job\n"))
 				})
 
@@ -240,4 +192,12 @@ func makeHandlerPullRequestEvent(event *github.PullRequestEvent) (*handler.GitHu
 		Payload: eventBytes,
 	}
 	return handlerEvent, nil
+}
+
+func issueLabels(labels ...string) []string {
+	var ls []string
+	for _, label := range labels {
+		ls = append(ls, fmt.Sprintf("foo/bar#17:%s", label))
+	}
+	return ls
 }

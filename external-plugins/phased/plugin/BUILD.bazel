@@ -67,5 +67,6 @@ go_test(
         "@io_k8s_test_infra//prow/git/v2:go_default_library",
         "@io_k8s_test_infra//prow/github:go_default_library",
         "@io_k8s_test_infra//prow/github/fakegithub:go_default_library",
+        "@io_k8s_test_infra//prow/labels:go_default_library",
     ],
 )

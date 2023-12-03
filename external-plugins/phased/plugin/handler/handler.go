@@ -14,6 +14,7 @@ import (
 	"k8s.io/test-infra/prow/config"
 	gitv2 "k8s.io/test-infra/prow/git/v2"
 	"k8s.io/test-infra/prow/github"
+	"k8s.io/test-infra/prow/labels"
 	"k8s.io/test-infra/prow/pjutil"
 )
 
@@ -69,6 +70,7 @@ type githubClientInterface interface {
 	GetPullRequest(string, string, int) (*github.PullRequest, error)
 	CreateComment(org, repo string, number int, comment string) error
 	GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error)
+	GetIssueLabels(org, repo string, number int) ([]github.Label, error)
 }
 
 func (h *GitHubEventsHandler) Handle(incomingEvent *GitHubEvent) {
@@ -82,22 +84,28 @@ func (h *GitHubEventsHandler) Handle(incomingEvent *GitHubEvent) {
 			eventLog.WithError(err).Error("Could not unmarshal event.")
 			return
 		}
-		h.handlePullRequestUpdateEvent(eventLog, &event)
+		h.handlePullRequestEvent(eventLog, &event)
 	default:
 		log.Infoln("Dropping irrelevant:", incomingEvent.Type, incomingEvent.GUID)
 	}
 }
 
 func (h *GitHubEventsHandler) shouldActOnPREvent(event *github.PullRequestEvent) bool {
-	switch event.Action {
-	case github.PullRequestActionLabeled:
-		return true
-	default:
-		return false
-	}
+	return event.Action == github.PullRequestActionLabeled
 }
 
-func (h *GitHubEventsHandler) handlePullRequestUpdateEvent(log *logrus.Entry, event *github.PullRequestEvent) {
+func (h *GitHubEventsHandler) shouldRunPhase2(org, repo, eventLabel string, prNum int) (bool, error) {
+	l, err := h.ghClient.GetIssueLabels(org, repo, prNum)
+	if err != nil {
+		log.WithError(err).Errorf("Could not get PR labels")
+		return false, err
+	}
+
+	return (eventLabel == labels.LGTM && github.HasLabel(labels.Approved, l)) ||
+		(eventLabel == labels.Approved && github.HasLabel(labels.LGTM, l)), nil
+}
+
+func (h *GitHubEventsHandler) handlePullRequestEvent(log *logrus.Entry, event *github.PullRequestEvent) {
 	log.Infof("Handling updated pull request: %s [%d]", event.Repo.FullName, event.PullRequest.Number)
 
 	if !h.shouldActOnPREvent(event) {
@@ -105,11 +113,16 @@ func (h *GitHubEventsHandler) handlePullRequestUpdateEvent(log *logrus.Entry, ev
 		return
 	}
 
-	// TODO add labels filter
-
 	org, repo, err := gitv2.OrgRepo(event.Repo.FullName)
 	if err != nil {
 		log.WithError(err).Errorf("Could not get org/repo from the event")
+		return
+	}
+
+	// TODO comment if error happend ?
+
+	shouldRun, err := h.shouldRunPhase2(org, repo, event.Label.Name, event.PullRequest.Number)
+	if err != nil || !shouldRun {
 		return
 	}
 
@@ -119,13 +132,7 @@ func (h *GitHubEventsHandler) handlePullRequestUpdateEvent(log *logrus.Entry, ev
 		return
 	}
 
-	git, err := h.gitClientFactory.ClientFor(org, repo)
-	if err != nil {
-		log.WithError(err).Errorf("Could not get client for git")
-		return
-	}
-
-	_, err = h.loadPresubmits(git, *pr)
+	_, err = h.loadPresubmits(*pr)
 	if err != nil {
 		log.WithError(err).Errorf("loadPresubmits failed")
 		return
@@ -134,7 +141,7 @@ func (h *GitHubEventsHandler) handlePullRequestUpdateEvent(log *logrus.Entry, ev
 	// TODD add rest of the logic here
 }
 
-func (h *GitHubEventsHandler) loadPresubmits(git gitv2.RepoClient, pr github.PullRequest) ([]config.Presubmit, error) {
+func (h *GitHubEventsHandler) loadPresubmits(pr github.PullRequest) ([]config.Presubmit, error) {
 	tmpdir, err := ioutil.TempDir("", "prow-configs")
 	if err != nil {
 		log.WithError(err).Error("Could not create a temp directory to store configs.")
@@ -152,14 +159,18 @@ func (h *GitHubEventsHandler) loadPresubmits(git gitv2.RepoClient, pr github.Pul
 	// h.prowLocation = "https://raw.githubusercontent.com/kubevirt/project-infra/main"
 	// h.prowConfigPath = "github/ci/prow-deploy/kustom/base/configs/current/config/config.yaml"
 	// h.jobsConfigBase = "github/ci/prow-deploy/files/jobs"
-
-	// TODO REMOVE
 	// org = "kubevirt"
 	// repo = "kubevirt"
 
 	var prowConfigBytes, jobConfigBytes []byte
 	prowLocation := h.prowLocation
 	if prowLocation == "" {
+		git, err := h.gitClientFactory.ClientFor(org, repo)
+		if err != nil {
+			log.WithError(err).Errorf("Could not get client for git")
+			return nil, err
+		}
+
 		// TODO or unit tests, unless we create a dedicated unit tests folder(s)
 		prowLocation = git.Directory()
 		ret := 0
@@ -283,7 +294,11 @@ func fetchRemoteFile(url string) ([]byte, error) {
 }
 
 func listRequiredManual(ghClient githubClientInterface, pr github.PullRequest, presubmits []config.Presubmit) error {
-	if pr.Draft {
+	if pr.Draft || pr.Merged || pr.State != "open" {
+		return nil
+	}
+
+	if pr.Mergable != nil && !*pr.Mergable {
 		return nil
 	}
 
@@ -306,12 +321,6 @@ func listRequested(ghClient githubClientInterface, pr github.PullRequest, reques
 
 	// Note: instead reading config and allowing only "require_manually_triggered_jobs" repos
 	if !(org == "kubevirt" && repo == "kubevirt") && !(org == "foo" && repo == "bar") {
-		return nil
-	}
-
-	// If the PR is not mergeable (e.g. due to merge conflicts), we will not trigger any jobs,
-	// to reduce the load on resources and reduce spam comments which will lead to a better review experience.
-	if pr.Mergable != nil && !*pr.Mergable {
 		return nil
 	}
 

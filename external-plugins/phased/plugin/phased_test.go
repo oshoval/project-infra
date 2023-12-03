@@ -94,7 +94,6 @@ var _ = Describe("Phased", func() {
 
 				gh.IssueLabelsExisting = append(gh.IssueLabelsExisting, issueLabels(labels.Approved)...)
 
-				testuser := "testuser"
 				By("Generating a fake pull request event and registering it to the github client", func() {
 					event = github.PullRequestEvent{
 						Action: github.PullRequestActionLabeled,
@@ -104,7 +103,7 @@ var _ = Describe("Phased", func() {
 							FullName: "foo/bar",
 						},
 						Sender: github.User{
-							Login: testuser,
+							Login: "testuser",
 						},
 						PullRequest: github.PullRequest{
 							Number: 17,
@@ -153,6 +152,7 @@ var _ = Describe("Phased", func() {
 					handlerEvent, err := makeHandlerPullRequestEvent(&event)
 					Expect(err).ShouldNot(HaveOccurred())
 
+					eventsHandler.SetLocalConfLoad()
 					eventsHandler.Handle(handlerEvent)
 
 					Expect(len(gh.IssueCommentsAdded)).To(Equal(1), "Expected github comment to be added")

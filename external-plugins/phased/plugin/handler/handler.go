@@ -128,9 +128,15 @@ func (h *GitHubEventsHandler) handlePullRequestEvent(log *logrus.Entry, event *g
 		return
 	}
 
-	err = listRequiredManual(h.ghClient, *pr, presumbits)
+	toTest, err := listRequiredManual(h.ghClient, *pr, presumbits)
 	if err != nil {
 		log.WithError(err).Errorf("listRequiredManual failed")
+		return
+	}
+
+	err = testRequested(h.ghClient, *pr, toTest)
+	if err != nil {
+		log.WithError(err).Errorf("testRequested failed")
 		return
 	}
 }
@@ -168,7 +174,7 @@ func (h *GitHubEventsHandler) loadPresubmits(pr github.PullRequest) ([]config.Pr
 
 	jobConfigTmp, err := writeTempFile(log, tmpdir, jobConfigBytes)
 	if err != nil {
-		log.WithError(err).Infoln("Could not write temp file")
+		log.WithError(err).Errorf("Could not write temporary Job config file")
 		return nil, err
 	}
 
@@ -186,8 +192,6 @@ func (h *GitHubEventsHandler) loadPresubmits(pr github.PullRequest) ([]config.Pr
 		}
 		for _, job := range jobs {
 			presumbits = append(presumbits, job)
-			// TODO REMOVE
-			log.Infof("DBG presubmit %s", job.Name)
 		}
 	}
 
@@ -199,7 +203,6 @@ func generateJobConfigURL(org, repo, prowLocation, jobsConfigBase string, branch
 	// for example kubevirt-presubmits-1.1.yaml will belong to release-1.1
 	// and kubevirt-presubmits.yaml belong to main / master
 	// must be yaml files (not yml)
-
 	branchAddon := ""
 	if strings.HasPrefix(branch, "release") {
 		branchAddon = "-" + strings.TrimPrefix(branch, "release")
@@ -266,23 +269,23 @@ func fetchRemoteFile(url string) ([]byte, error) {
 	return body, nil
 }
 
-func listRequiredManual(ghClient githubClientInterface, pr github.PullRequest, presubmits []config.Presubmit) error {
+func listRequiredManual(ghClient githubClientInterface, pr github.PullRequest, presubmits []config.Presubmit) ([]config.Presubmit, error) {
 	if pr.Draft || pr.Merged || pr.State != "open" {
-		return nil
+		return nil, nil
 	}
 
 	if pr.Mergable != nil && !*pr.Mergable {
-		return nil
+		return nil, nil
 	}
 
 	org, repo, number, branch := pr.Base.Repo.Owner.Login, pr.Base.Repo.Name, pr.Number, pr.Base.Ref
 	changes := config.NewGitHubDeferredChangedFilesProvider(ghClient, org, repo, number)
 	toTest, err := pjutil.FilterPresubmits(manualRequiredFilter, changes, branch, presubmits, log)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return listRequested(ghClient, pr, toTest)
+	return toTest, nil
 }
 
 func manualRequiredFilter(p config.Presubmit) (bool, bool, bool) {
@@ -291,14 +294,14 @@ func manualRequiredFilter(p config.Presubmit) (bool, bool, bool) {
 	return cond, cond, false
 }
 
-func listRequested(ghClient githubClientInterface, pr github.PullRequest, requestedJobs []config.Presubmit) error {
+func testRequested(ghClient githubClientInterface, pr github.PullRequest, requestedJobs []config.Presubmit) error {
 	org, repo, err := gitv2.OrgRepo(pr.Base.Repo.FullName)
 	if err != nil {
 		log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
 		return err
 	}
 
-	// Note: instead reading config and allowing only "require_manually_triggered_jobs" repos
+	// Until we update k8s.io/test-infra which allows to read require_manually_triggered_jobs policy
 	if !(org == "kubevirt" && repo == "kubevirt") && !(org == "foo" && repo == "bar") {
 		return nil
 	}
@@ -306,14 +309,12 @@ func listRequested(ghClient githubClientInterface, pr github.PullRequest, reques
 	var result string
 	for _, job := range requestedJobs {
 		result += "/test " + job.Name + "\n"
-		// REMOVE
-		//log.Infof("DBG presubmit %s", job.Name)
+		log.Debugf("Found presubmit %s", job.Name)
 	}
 
 	if result != "" {
-		// REMOVE
-		//log.Infof("DBG presubmit %s %s %d %s", org, repo, pr.Number, result)
 		if err := ghClient.CreateComment(org, repo, pr.Number, result); err != nil {
+			log.WithError(err).Errorf("CreateComment failed PR %d", pr.Number)
 			return err
 		}
 	}

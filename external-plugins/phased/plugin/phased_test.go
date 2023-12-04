@@ -20,10 +20,15 @@ import (
 	"kubevirt.io/project-infra/external-plugins/phased/plugin/handler"
 )
 
+const (
+	org      = "foo"
+	repo     = "bar"
+	orgRepo  = org + "/" + repo
+	prNumber = 17
+)
+
 var _ = Describe("Phased", func() {
-
 	Context("A valid pull request event", func() {
-
 		var gitrepo *localgit.LocalGit
 		var gitClientFactory git2.ClientFactory
 
@@ -39,26 +44,26 @@ var _ = Describe("Phased", func() {
 			}
 		})
 
-		Context("ok-to-test label is set", func() {
-			It("Should generate Prow jobs for the changed configs with ok-to-test label", func() {
-
+		Context("lgtm label is added", func() {
+			It("Should comment the manually required Prow jobs", func() {
 				By("Creating a fake git repo", func() {
-					makeRepoWithEmptyProwConfig(gitrepo, "foo", "bar")
+					makeRepoWithEmptyProwConfig(gitrepo, org, repo)
 				})
 
 				var baseref string
-				By("Generating a base commit with a job", func() {
+				By("Generating a base commit with jobs", func() {
 					baseConfig, err := json.Marshal(&config.Config{
 						JobConfig: config.JobConfig{
 							PresubmitsStatic: map[string][]config.Presubmit{
-								"foo/bar": {
+								orgRepo: {
 									{
+										AlwaysRun: true,
 										JobBase: config.JobBase{
-											Name: "modified-job",
+											Name: "job_always_run",
 											Spec: &v1.PodSpec{
 												Containers: []v1.Container{
 													{
-														Image: "some-image",
+														Image: "image1",
 													},
 												},
 											},
@@ -66,11 +71,11 @@ var _ = Describe("Phased", func() {
 									},
 									{
 										JobBase: config.JobBase{
-											Name: "existing-job",
+											Name: "job_always_run_false",
 											Spec: &v1.PodSpec{
 												Containers: []v1.Container{
 													{
-														Image: "other-image",
+														Image: "image2",
 													},
 												},
 											},
@@ -81,45 +86,44 @@ var _ = Describe("Phased", func() {
 						},
 					})
 					Expect(err).ShouldNot(HaveOccurred())
-					err = gitrepo.AddCommit("foo", "bar", map[string][]byte{
+					err = gitrepo.AddCommit(org, repo, map[string][]byte{
 						"jobs-config.yaml": baseConfig,
 					})
 					Expect(err).ShouldNot(HaveOccurred())
-					baseref, err = gitrepo.RevParse("foo", "bar", "HEAD")
+					baseref, err = gitrepo.RevParse(org, repo, "HEAD")
 					Expect(err).ShouldNot(HaveOccurred())
 				})
 
 				gh := fakegithub.NewFakeClient()
-				var event github.PullRequestEvent
-
 				gh.IssueLabelsExisting = append(gh.IssueLabelsExisting, issueLabels(labels.Approved)...)
 
+				var event github.PullRequestEvent
 				By("Generating a fake pull request event and registering it to the github client", func() {
 					event = github.PullRequestEvent{
 						Action: github.PullRequestActionLabeled,
 						Label:  github.Label{Name: labels.LGTM},
 						GUID:   "guid",
 						Repo: github.Repo{
-							FullName: "foo/bar",
+							FullName: orgRepo,
 						},
 						Sender: github.User{
 							Login: "testuser",
 						},
 						PullRequest: github.PullRequest{
-							Number: 17,
+							Number: prNumber,
 							State:  "open",
 							Base: github.PullRequestBranch{
 								Repo: github.Repo{
-									Name:     "bar",
-									FullName: "foo/bar",
+									Name:     repo,
+									FullName: orgRepo,
 								},
 								Ref: baseref,
 								SHA: baseref,
 							},
 							Head: github.PullRequestBranch{
 								Repo: github.Repo{
-									Name:     "bar",
-									FullName: "foo/bar",
+									Name:     repo,
+									FullName: orgRepo,
 								},
 								Ref: baseref,
 								SHA: baseref,
@@ -128,12 +132,11 @@ var _ = Describe("Phased", func() {
 					}
 
 					gh.PullRequests = map[int]*github.PullRequest{
-						17: &event.PullRequest,
+						prNumber: &event.PullRequest,
 					}
 				})
 
 				By("Sending the event to the phased plugin server", func() {
-
 					prowc := &fake.FakeProwV1{
 						Fake: &testing.Fake{},
 					}
@@ -156,7 +159,7 @@ var _ = Describe("Phased", func() {
 					eventsHandler.Handle(handlerEvent)
 
 					Expect(len(gh.IssueCommentsAdded)).To(Equal(1), "Expected github comment to be added")
-					Expect(gh.IssueCommentsAdded[0]).To(Equal("foo/bar#17:/test modified-job\n/test existing-job\n"))
+					Expect(gh.IssueCommentsAdded[0]).To(Equal(fmt.Sprintf("%s#%d:/test job_always_run_false\n", orgRepo, prNumber)))
 				})
 
 			})
@@ -167,8 +170,8 @@ var _ = Describe("Phased", func() {
 
 })
 
-func makeRepoWithEmptyProwConfig(lg *localgit.LocalGit, repo, org string) error {
-	err := lg.MakeFakeRepo(repo, org)
+func makeRepoWithEmptyProwConfig(lg *localgit.LocalGit, org, repo string) error {
+	err := lg.MakeFakeRepo(org, repo)
 	if err != nil {
 		return err
 	}
@@ -176,7 +179,7 @@ func makeRepoWithEmptyProwConfig(lg *localgit.LocalGit, repo, org string) error 
 	if err != nil {
 		return err
 	}
-	return lg.AddCommit("foo", "bar", map[string][]byte{
+	return lg.AddCommit(org, repo, map[string][]byte{
 		"prowconfig.yaml": prowConfig,
 	})
 }
@@ -197,7 +200,7 @@ func makeHandlerPullRequestEvent(event *github.PullRequestEvent) (*handler.GitHu
 func issueLabels(labels ...string) []string {
 	var ls []string
 	for _, label := range labels {
-		ls = append(ls, fmt.Sprintf("foo/bar#17:%s", label))
+		ls = append(ls, fmt.Sprintf("%s#%d:%s", orgRepo, prNumber, label))
 	}
 	return ls
 }

@@ -142,45 +142,15 @@ func (h *GitHubEventsHandler) handlePullRequestEvent(log *logrus.Entry, event *g
 }
 
 func (h *GitHubEventsHandler) loadPresubmits(pr github.PullRequest) ([]config.Presubmit, error) {
-	tmpdir, err := ioutil.TempDir("", "prow-configs")
+	pc, err := h.loadProwConfig(pr.Base.Repo.FullName, pr.Base.Ref)
 	if err != nil {
-		log.WithError(err).Error("Could not create a temp directory to store configs.")
+		log.WithError(err).Errorf("Could not load prow config")
 		return nil, err
 	}
-	defer os.RemoveAll(tmpdir)
 
 	org, repo, err := gitv2.OrgRepo(pr.Base.Repo.FullName)
 	if err != nil {
 		log.WithError(err).Errorf("Could not parse repo name: %s", pr.Base.Repo.FullName)
-		return nil, err
-	}
-
-	// TODO REMOVE
-	// LoadConfigBytesFunc = loadConfigBytes
-	// h.prowLocation = "https://raw.githubusercontent.com/kubevirt/project-infra/main"
-	// h.prowConfigPath = "github/ci/prow-deploy/kustom/base/configs/current/config/config.yaml"
-	// h.jobsConfigBase = "github/ci/prow-deploy/files/jobs"
-	// org = "kubevirt"
-	// repo = "kubevirt"
-
-	var prowConfigBytes, jobConfigBytes []byte
-	prowConfigBytes, jobConfigBytes, err = LoadConfigBytesFunc(h, org, repo, pr.Base.Ref)
-
-	prowConfigTmp, err := writeTempFile(log, tmpdir, prowConfigBytes)
-	if err != nil {
-		log.WithError(err).Errorf("Could not write temporary Prow config.")
-		return nil, err
-	}
-
-	jobConfigTmp, err := writeTempFile(log, tmpdir, jobConfigBytes)
-	if err != nil {
-		log.WithError(err).Errorf("Could not write temporary Job config file")
-		return nil, err
-	}
-
-	pc, err := config.Load(prowConfigTmp, jobConfigTmp, nil, "")
-	if err != nil {
-		log.WithError(err).Errorf("Could not load prow config")
 		return nil, err
 	}
 
@@ -360,4 +330,41 @@ func loadConfigBytes(h *GitHubEventsHandler, org, repo, branch string) ([]byte, 
 	}
 
 	return prowConfigBytes, jobConfigBytes, nil
+}
+
+func (h *GitHubEventsHandler) loadProwConfig(prFullName, branch string) (*config.Config, error) {
+	tmpdir, err := ioutil.TempDir("", "prow-configs")
+	if err != nil {
+		log.WithError(err).Error("Could not create a temp directory to store configs.")
+		return nil, err
+	}
+	defer os.RemoveAll(tmpdir)
+
+	org, repo, err := gitv2.OrgRepo(prFullName)
+	if err != nil {
+		log.WithError(err).Errorf("Could not parse repo name: %s", prFullName)
+		return nil, err
+	}
+
+	prowConfigBytes, jobConfigBytes, err := LoadConfigBytesFunc(h, org, repo, branch)
+
+	prowConfigTmp, err := writeTempFile(log, tmpdir, prowConfigBytes)
+	if err != nil {
+		log.WithError(err).Errorf("Could not write temporary Prow config.")
+		return nil, err
+	}
+
+	jobConfigTmp, err := writeTempFile(log, tmpdir, jobConfigBytes)
+	if err != nil {
+		log.WithError(err).Errorf("Could not write temporary Job config file")
+		return nil, err
+	}
+
+	pc, err := config.Load(prowConfigTmp, jobConfigTmp, nil, "")
+	if err != nil {
+		log.WithError(err).Errorf("Could not load prow config")
+		return nil, err
+	}
+
+	return pc, nil
 }

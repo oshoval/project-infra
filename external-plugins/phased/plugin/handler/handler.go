@@ -25,11 +25,17 @@ func init() {
 	log.SetOutput(os.Stdout)
 }
 
-// GitHubEvent represents a valid GitHub event in the events channel
 type GitHubEvent struct {
 	Type    string
 	GUID    string
 	Payload []byte
+}
+
+type githubClientInterface interface {
+	GetPullRequest(string, string, int) (*github.PullRequest, error)
+	CreateComment(org, repo string, number int, comment string) error
+	GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error)
+	GetIssueLabels(org, repo string, number int) ([]github.Label, error)
 }
 
 type loadConfigBytesFunc func(h *GitHubEventsHandler, org, repo, branch string) ([]byte, []byte, error)
@@ -47,7 +53,6 @@ type GitHubEventsHandler struct {
 	prowLocation     string
 }
 
-// NewGitHubEventsHandler returns a new github events handler
 func NewGitHubEventsHandler(
 	eventsChan <-chan *GitHubEvent,
 	logger *logrus.Logger,
@@ -68,13 +73,6 @@ func NewGitHubEventsHandler(
 		prowLocation:     prowLocation,
 		gitClientFactory: gitClientFactory,
 	}
-}
-
-type githubClientInterface interface {
-	GetPullRequest(string, string, int) (*github.PullRequest, error)
-	CreateComment(org, repo string, number int, comment string) error
-	GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error)
-	GetIssueLabels(org, repo string, number int) ([]github.Label, error)
 }
 
 func (h *GitHubEventsHandler) Handle(incomingEvent *GitHubEvent) {
@@ -124,9 +122,15 @@ func (h *GitHubEventsHandler) handlePullRequestEvent(log *logrus.Entry, event *g
 		return
 	}
 
-	_, err = h.loadPresubmits(*pr)
+	presumbits, err := h.loadPresubmits(*pr)
 	if err != nil {
 		log.WithError(err).Errorf("loadPresubmits failed")
+		return
+	}
+
+	err = listRequiredManual(h.ghClient, *pr, presumbits)
+	if err != nil {
+		log.WithError(err).Errorf("listRequiredManual failed")
 		return
 	}
 }
@@ -155,62 +159,6 @@ func (h *GitHubEventsHandler) loadPresubmits(pr github.PullRequest) ([]config.Pr
 
 	var prowConfigBytes, jobConfigBytes []byte
 	prowConfigBytes, jobConfigBytes, err = LoadConfigBytesFunc(h, org, repo, pr.Base.Ref)
-
-	// if h.prowLocation == "" {
-	// 	prowConfigBytes, jobConfigBytes, err = loadLocalConfigBytes(h, org, repo, pr.Base.Ref)
-	// } else {
-	// 	prowConfigBytes, jobConfigBytes, err = LoadConfigBytesFunc(h, org, repo, pr.Base.Ref)
-	// }
-
-	/*
-		if h.prowLocation == "" {
-			git, err := h.gitClientFactory.ClientFor(org, repo)
-			if err != nil {
-				log.WithError(err).Errorf("Could not get client for git")
-				return nil, err
-			}
-
-			// TODO or unit tests, unless we create a dedicated unit tests folder(s)
-			ret := 0
-			// TODO think about the 128 not found
-			prowConfigBytes, ret = catFile(log, git.Directory(), h.prowConfigPath, "HEAD")
-			if ret != 0 && ret != 128 {
-				log.WithError(err).Errorf("Could not load Prow config %s", h.prowConfigPath)
-				return nil, err
-			}
-
-			// TODO maybe we can do that also on unit tests jobsConfigBase wil be the base
-			// and there will be a file based on org/repo/repo-presubmit there as in real
-			jobConfigBytes, ret = catFile(log, git.Directory(), h.jobsConfigBase, "HEAD")
-			if ret != 0 && ret != 128 {
-				log.WithError(err).Errorf("Could not load Prow config %s", h.jobsConfigBase)
-				return nil, err
-			}
-		} else {
-			prowConfigUrl := h.prowLocation + "/" + h.prowConfigPath
-			prowConfigBytes, err = fetchRemoteFile(prowConfigUrl)
-			if err != nil {
-				log.WithError(err).Errorf("Could not fetch prow config from %s", prowConfigUrl)
-				return nil, err
-			}
-
-			// branchAddon := ""
-			// if strings.HasPrefix(pr.Base.Ref, "release") {
-			// 	branchAddon = "-" + strings.TrimPrefix(pr.Base.Ref, "release")
-			// }
-
-			// NOTE: only branches main / master and release-<number> are supported, and must be yaml files (not yml)
-			// for example kubevirt-presubmits-1.1.yaml will belong to release-1.1
-			// jobConfigUrl := prowLocation + "/" + h.jobsConfigBase + "/" + org + "/" +
-			// 	repo + "/" + repo + "-presubmits" + branchAddon + ".yaml"
-
-			jobConfigUrl := generateJobConfigURL(org, repo, h.prowLocation, h.jobsConfigBase, pr.Base.Ref)
-			jobConfigBytes, err = fetchRemoteFile(jobConfigUrl)
-			if err != nil {
-				log.WithError(err).Errorf("Could not fetch prow config from %s", jobConfigUrl)
-				return nil, err
-			}
-		} */
 
 	prowConfigTmp, err := writeTempFile(log, tmpdir, prowConfigBytes)
 	if err != nil {
@@ -242,9 +190,6 @@ func (h *GitHubEventsHandler) loadPresubmits(pr github.PullRequest) ([]config.Pr
 			log.Infof("DBG presubmit %s", job.Name)
 		}
 	}
-
-	// TODO move
-	err = listRequiredManual(h.ghClient, pr, presumbits)
 
 	return presumbits, nil
 }

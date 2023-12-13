@@ -14,10 +14,12 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/oauth2"
-
 	"github.com/Masterminds/semver"
 	"github.com/google/go-github/v32/github"
+	"golang.org/x/oauth2"
+	"gopkg.in/yaml.v3"
+
+	"k8s.io/test-infra/prow/config"
 )
 
 type blockerListCacheEntry struct {
@@ -414,8 +416,14 @@ func (r *releaseData) forkProwJobs() error {
 
 	// create new prow configs if they don't already exist
 	if _, err := os.Stat(fullOutputConfig); err != nil && os.IsNotExist(err) {
+		updateJobConfig, err := updatePhase2Jobs(r.org, r.repo, fullJobConfig)
+		if err != nil {
+			return err
+		}
+		defer os.Remove(updateJobConfig)
+
 		log.Printf("Creating new prow yaml at path %s", fullOutputConfig)
-		cmd := exec.Command("/usr/bin/config-forker", "--job-config", fullJobConfig, "--version", version, "--output", fullOutputConfig)
+		cmd := exec.Command("/usr/bin/config-forker", "--job-config", updateJobConfig, "--version", version, "--output", fullOutputConfig)
 		bytes, err := cmd.CombinedOutput()
 		if err != nil {
 			log.Printf("ERROR: config-forker command output: %s : %s ", string(bytes), err)
@@ -1270,4 +1278,54 @@ func main() {
 			log.Fatalf("ERROR Creating Tag: %s ", err)
 		}
 	}
+}
+
+func updatePhase2Jobs(org, repo, fullJobConfig string) (string, error) {
+	prowConfigTmp, err := createEmptyTmpFile()
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(prowConfigTmp)
+
+	pc, err := config.Load(prowConfigTmp, fullJobConfig, nil, "")
+	if err != nil {
+		return "", err
+	}
+
+	orgRepo := org + "/" + repo
+	for key, jobs := range pc.PresubmitsStatic {
+		if key != orgRepo {
+			continue
+		}
+		for i, job := range jobs {
+			if job.AlwaysRun == false &&
+				job.Optional == false &&
+				job.RegexpChangeMatcher.RunIfChanged == "" &&
+				job.RegexpChangeMatcher.SkipIfOnlyChanged == "" {
+				pc.PresubmitsStatic[key][i].AlwaysRun = true
+			}
+		}
+	}
+
+	yamlData, err := yaml.Marshal(pc)
+	if err != nil {
+		return "", err
+	}
+
+	updateJobConfig := os.TempDir() + "/job-config.yaml"
+	err = ioutil.WriteFile(updateJobConfig, yamlData, 0644)
+	if err != nil {
+		return "", err
+	}
+	return updateJobConfig, nil
+}
+
+func createEmptyTmpFile() (string, error) {
+	tmpFile, err := os.CreateTemp("", "dummy-config")
+	if err != nil {
+		return "", err
+	}
+	defer tmpFile.Close()
+
+	return tmpFile.Name(), nil
 }

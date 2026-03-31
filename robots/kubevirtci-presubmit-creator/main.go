@@ -175,7 +175,7 @@ func AddNewPresubmitIfNotExists(jobConfig config.JobConfig, latestReleaseSemver 
 
 func CreatePresubmitJobForRelease(semver *querier.SemVer) config.Presubmit {
 	yes := true
-	golangImage := "quay.io/kubevirtci/golang:v20230801-94954c0"
+	golangImage := "quay.io/kubevirtci/golang:v20260319-c8f1db8"
 	cluster := "prow-workloads"
 	res := config.Presubmit{
 		AlwaysRun: false,
